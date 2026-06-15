@@ -1,0 +1,6 @@
+.env
+.mcp.json
+.venv
+.agent
+__pycache__/
+*.pyc
