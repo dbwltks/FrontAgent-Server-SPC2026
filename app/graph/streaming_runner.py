@@ -11,6 +11,9 @@ from app.graph.nodes.update_session_node import update_session_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 from app.graph.prompt_builder import build_response_instructions
 from app.providers.openai_streaming_provider import stream_text
+from app.repositories.conversation_repo import list_conversation_messages
+
+HISTORY_LIMIT = 10
 
 
 async def run_agent_streaming(
@@ -56,12 +59,29 @@ async def run_agent_streaming(
         session_state=state.get("session_state"),
     )
 
+    # Supabase에서 이전 대화 히스토리 조회
+    conversation_history = []
+    conversation_id = state.get("conversation_id")
+    if conversation_id:
+        raw_messages = list_conversation_messages(
+            organization_id=state["organization_id"],
+            conversation_id=conversation_id,
+            limit=HISTORY_LIMIT,
+        )
+        for msg in raw_messages:
+            sender = msg.get("sender_type")
+            if sender == "customer":
+                conversation_history.append({"role": "user", "content": msg["message"]})
+            elif sender == "ai":
+                conversation_history.append({"role": "assistant", "content": msg["message"]})
+
     # 7. OpenAI 응답을 delta 단위로 받기
     chunks: list[str] = []
 
     for delta in stream_text(
         instructions=instructions,
         input_text=state["user_message"],
+        conversation_history=conversation_history or None,
     ):
         chunks.append(delta)
 

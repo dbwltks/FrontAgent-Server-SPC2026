@@ -1,24 +1,36 @@
 from app.graph.state import AgentState
 from app.graph.prompt_builder import build_response_instructions
 from app.providers.openai_provider import generate_text
+from app.repositories.conversation_repo import list_conversation_messages
+
+HISTORY_LIMIT = 10  # 최근 N개 메시지만 컨텍스트로 사용
 
 
 def response_node(state: AgentState) -> AgentState:
-    """
-    AI 최종 응답을 생성하는 노드.
-
-    현재 노드는 전체 응답을 한 번에 생성한다.
-    WebSocket streaming에서는 별도 streaming_runner를 사용한다.
-    """
-
-    # 1. state에서 응답 생성에 필요한 값 가져오기
     intent = state.get("intent")
     applied_rules = state.get("applied_rules", [])
     knowledge_context = state.get("knowledge_context", [])
     session_state = state.get("session_state")
     user_message = state["user_message"]
+    organization_id = state["organization_id"]
+    conversation_id = state.get("conversation_id")
 
-    # 2. 규칙, 지식, 이전 대화 맥락을 포함한 AI instructions 생성
+    # Supabase에서 이전 대화 히스토리 조회
+    conversation_history = []
+    if conversation_id:
+        raw_messages = list_conversation_messages(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            limit=HISTORY_LIMIT,
+        )
+        # sender_type → OpenAI role 변환 (customer=user, ai=assistant)
+        for msg in raw_messages:
+            sender = msg.get("sender_type")
+            if sender == "customer":
+                conversation_history.append({"role": "user", "content": msg["message"]})
+            elif sender == "ai":
+                conversation_history.append({"role": "assistant", "content": msg["message"]})
+
     instructions = build_response_instructions(
         intent=intent,
         applied_rules=applied_rules,
@@ -26,13 +38,12 @@ def response_node(state: AgentState) -> AgentState:
         session_state=session_state,
     )
 
-    # 3. OpenAI 전체 응답 생성
     final_response = generate_text(
         instructions=instructions,
         user_message=user_message,
+        conversation_history=conversation_history or None,
     )
 
-    # 4. 최종 응답을 state에 저장
     state["final_response"] = final_response
 
     return state
