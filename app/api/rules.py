@@ -32,7 +32,7 @@ def model_to_dict(model: BaseModel) -> dict:
 
     return model.dict()
 
-
+# 룰 작성 양식
 class RuleCreateRequest(BaseModel):
     organization_id: str = Field(..., example="org_test")
 
@@ -47,6 +47,8 @@ class RuleCreateRequest(BaseModel):
         example="reservation",
     )
 
+
+    # 단어가 하나만 있어도 되는지 전부 있어야 되는지
     trigger_condition: str = Field(
         default="contains_all",
         example="contains_all",
@@ -58,17 +60,20 @@ class RuleCreateRequest(BaseModel):
         example="사용자가 에어컨과 냉장고를 동시에 요청하면 예약을 진행하지 말고, 하나씩 따로 예약하도록 안내한다.",
     )
 
+    # 검사할 단어
     filters: list[str] = Field(
         default_factory=list,
         example=["에어컨", "냉장고"],
     )
 
+    # 경고만 할 지, 막을지, 상담원에게 넘길지
     action_type: str = Field(
         default="block",
         example="block",
         description="block, warn, handoff",
     )
 
+    # 막을때 뭐라고 할 지
     response_message: str | None = Field(
         default=None,
         example="에어컨과 냉장고는 동시에 수리할 수 없습니다. 하나씩 따로 예약해 주세요.",
