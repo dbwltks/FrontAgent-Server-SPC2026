@@ -11,6 +11,21 @@ from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.update_session_node import update_session_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
+def route_after_rule(state: AgentState) -> str:
+    """
+    rule_node 이후 흐름 결정
+
+    - block / handoff 룰이 걸려 final_response가 이미 있으면
+      knowledge 검색 없이 response로 이동
+    - final_response가 없으면
+      knowledge 검색 후 response 생성
+    """
+    if state.get("final_response"):
+        return "response"
+
+    return "knowledge"
+
+
 
 def build_graph():
     """
@@ -21,8 +36,10 @@ def build_graph():
     2. 상담방 생성/조회 + 고객 메시지 저장
     3. intent 분류
     4. rule 적용
-    5. knowledge 검색
-    6. AI 응답 생성
+    5. rule 결과에 따라 분기
+       - final_response가 있으면 knowledge 검색 없이 response로 이동
+       - final_response가 없으면 knowledge 검색 후 response로 이동
+    6. AI 응답 또는 rule 응답 처리
     7. AI 메시지 저장
     8. Redis 세션 업데이트
     9. Agent Run Log 저장
@@ -48,7 +65,16 @@ def build_graph():
     graph.add_edge("load_session", "conversation")
     graph.add_edge("conversation", "router")
     graph.add_edge("router", "rule")
-    graph.add_edge("rule", "knowledge")
+
+    graph.add_conditional_edges(
+        "rule",
+        route_after_rule,
+        {
+            "knowledge": "knowledge",
+            "response": "response",
+        },
+    )
+    
     graph.add_edge("knowledge", "response")
     graph.add_edge("response", "save_ai_message")
     graph.add_edge("save_ai_message", "update_session")

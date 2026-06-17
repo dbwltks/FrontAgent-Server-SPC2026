@@ -1,7 +1,10 @@
+
+# 이 사용자 메시지에 어떤 룰이 적용돼야 하는지 판단
 def normalize_text(text: str | None) -> str:
     """
     비교를 쉽게 하기 위해 문자열을 정리한다.
     지금은 공백 제거 + 소문자 변환만 한다.
+    "에어컨 냉장고" -> "에어컨냉장고"
     """
     if not text:
         return ""
@@ -36,6 +39,7 @@ def normalize_filters(filters) -> list[str]:
 def contains_any_keyword(user_message: str, filters: list[str]) -> bool:
     """
     filters 중 하나라도 user_message에 포함되면 True
+    둘 중 하나만 있어도 걸리는 룰
     """
     normalized_message = normalize_text(user_message)
 
@@ -51,6 +55,7 @@ def contains_any_keyword(user_message: str, filters: list[str]) -> bool:
 def contains_all_keywords(user_message: str, filters: list[str]) -> bool:
     """
     filters에 있는 모든 키워드가 user_message에 포함되면 True
+    모든 단어가 다 있어야 걸리는 룰
     """
     normalized_message = normalize_text(user_message)
 
@@ -68,7 +73,7 @@ def contains_all_keywords(user_message: str, filters: list[str]) -> bool:
 
     return True
 
-
+##############
 def is_intent_matched(rule: dict, intent: str | None) -> bool:
     """
     rule_type과 intent가 같은지 확인한다.
@@ -89,6 +94,7 @@ def is_rule_matched(
 ) -> bool:
     """
     rule 하나가 현재 사용자 메시지에 적용되는지 판단한다.
+    trigger_condition은 룰이 켜지는 조건
     """
     trigger_condition = normalize_text(rule.get("trigger_condition"))
     filters = normalize_filters(rule.get("filters"))
