@@ -16,7 +16,7 @@ def retrieve_knowledge(
     organization_id: str,
     query: str,
     match_count: int = 5, # 반환할 chunk 개수
-    similarity_threshold: float = 0.1, # 유사도 임계값
+    similarity_threshold: float = 0.1, # 유사도 임계값  
 ) -> list[dict]:
     query_embedding = create_embedding(query)
 

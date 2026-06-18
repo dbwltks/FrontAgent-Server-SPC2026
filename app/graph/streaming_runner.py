@@ -48,10 +48,13 @@ async def run_agent_streaming(
     # 4. 사용자 intent 분류
     state = router_node(state)
 
-    # 5. 등록 지식 RAG 검색
+    # 5. rule 적용
+    state = rule_node(state)
+
+    # 6. 등록 지식 RAG 검색
     state = knowledge_node(state)
 
-    # 6. streaming 응답용 instructions 생성 (이전 대화 맥락 포함)
+    # 7. streaming 응답용 instructions 생성 (이전 대화 맥락 포함)
     instructions = build_response_instructions(
         intent=state.get("intent"),
         applied_rules=state.get("applied_rules", []),
@@ -75,7 +78,7 @@ async def run_agent_streaming(
             elif sender == "ai":
                 conversation_history.append({"role": "assistant", "content": msg["message"]})
 
-    # 7. OpenAI 응답을 delta 단위로 받기
+    # 8. OpenAI 응답을 delta 단위로 받기
     chunks: list[str] = []
 
     for delta in stream_text(
@@ -88,16 +91,16 @@ async def run_agent_streaming(
         # delta가 생성될 때마다 WebSocket으로 전달
         await on_delta(delta)
 
-    # 8. 전체 delta를 하나의 최종 응답으로 합치기
+    # 9. 전체 delta를 하나의 최종 응답으로 합치기
     state["final_response"] = "".join(chunks)
 
-    # 9. 완성된 AI 응답을 conversation_messages에 저장
+    # 10. 완성된 AI 응답을 conversation_messages에 저장
     state = save_ai_message_node(state)
 
-    # 10. Redis 세션 상태 업데이트
+    # 11. Redis 세션 상태 업데이트
     state = update_session_node(state)
 
-    # 11. agent_runs 실행 로그 저장
+    # 12. agent_runs 실행 로그 저장
     state = save_agent_run_node(state)
 
     return state

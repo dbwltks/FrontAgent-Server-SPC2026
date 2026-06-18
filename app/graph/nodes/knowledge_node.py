@@ -1,5 +1,6 @@
 from app.graph.state import AgentState
 from app.rag.retriever import retrieve_knowledge
+from app.repositories.knowledge_repo import increment_reference_counts
 
 
 def knowledge_node(state: AgentState) -> AgentState:
@@ -19,5 +20,14 @@ def knowledge_node(state: AgentState) -> AgentState:
         }
         for item in knowledge_context
     ]
+
+    source_ids = [
+        item.get("source_id")
+        for item in knowledge_context
+        if item.get("source_id")
+    ]
+
+    if source_ids:
+        increment_reference_counts(source_ids)
 
     return state

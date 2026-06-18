@@ -66,6 +66,14 @@ def delete_knowledge_source(
     return bool(result.data)
 
 
+def increment_reference_counts(source_ids: list[str]) -> None:
+    for source_id in set(source_ids):
+        supabase.rpc(
+            "increment_knowledge_reference_count",
+            {"source_id_input": source_id},
+        ).execute()
+
+
 def list_knowledge_chunks(
     organization_id: str,
     source_id: str,
