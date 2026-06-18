@@ -57,6 +57,7 @@ async def run_agent_streaming(
     # 7. streaming 응답용 instructions 생성 (이전 대화 맥락 포함)
     instructions = build_response_instructions(
         intent=state.get("intent"),
+        rules=state.get("rules", []),
         applied_rules=state.get("applied_rules", []),
         knowledge_context=state.get("knowledge_context", []),
         session_state=state.get("session_state"),
