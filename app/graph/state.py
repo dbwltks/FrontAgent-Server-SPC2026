@@ -37,22 +37,14 @@ class AgentState(TypedDict):
     # 나중에 task_node 실행 결과를 저장할 공간
     task_result: Optional[Dict[str, Any]]
 
+    # 기존 should_use_knowledge_node와의 호환용
+    # decision_node 구조가 안정화되면 나중에 제거 가능
+    should_use_knowledge: bool
+
     # Rule Node에서 불러온 활성 규칙 목록
-    # 예:
-    # [
-    #   {
-    #     "id": "...",
-    #     "name": "반말하지 않기",
-    #     "instruction": "고객에게 절대 반말하지 않고 항상 존댓말로 응답한다."
-    #   }
-    # ]
     rules: List[Dict[str, Any]]
 
     # AI 프롬프트에 넣기 좋게 정리된 규칙 지시문 문자열
-    # 예:
-    # [응답 규칙]
-    # 1. 반말하지 않기
-    # - 고객에게 절대 반말하지 않고 항상 존댓말로 응답한다.
     rule_instructions: str
 
     # 관리자 로그용으로 정리된 적용 규칙 이름 목록
