@@ -58,7 +58,7 @@ async def websocket_chat(
             )
 
             # 6. AI 응답 시작 이벤트를 중복으로 보내지 않기 위한 플래그
-            #    실제 delta가 처음 생성될 때 ai_response_start를 보낸다.
+            # 실제 delta가 처음 생성될 때 ai_response_start를 보낸다.
             ai_response_started = False
 
             async def send_delta(delta: str) -> None:
@@ -68,7 +68,6 @@ async def websocket_chat(
                 첫 delta가 오기 직전에 ai_response_start 이벤트를 보낸다.
                 이렇게 하면 ai_enabled=false인 경우에는 ai_response_start가 잘못 나가지 않는다.
                 """
-
                 nonlocal ai_response_started
 
                 if not ai_response_started:
@@ -79,6 +78,7 @@ async def websocket_chat(
                     )
                     ai_response_started = True
 
+                # 한 글자씩 보이는 streaming 방식 유지
                 await websocket.send_json(
                     {
                         "type": "ai_response_delta",
@@ -88,12 +88,15 @@ async def websocket_chat(
 
             try:
                 # 7. Streaming Agent 실행
-                #    내부 흐름:
-                #    - conversation 생성/조회
-                #    - customer message 저장
-                #    - ai_enabled 확인
-                #    - AI가 켜져 있으면 rule/rag/response streaming 실행
-                #    - 최종 응답 저장
+                # 내부 흐름:
+                # - conversation 생성/조회
+                # - customer message 저장
+                # - ai_enabled 확인
+                # - decision 판단
+                # - 필요하면 knowledge 검색
+                # - rules 조회
+                # - AI response streaming
+                # - 최종 응답 저장
                 result = await run_agent_streaming(
                     initial_state={
                         "organization_id": organization_id,
@@ -106,20 +109,37 @@ async def websocket_chat(
                         # 기본값은 True지만 conversation_node에서 DB 값을 다시 넣는다.
                         "ai_enabled": True,
 
-                        # 초기 state 값들
+                        # Redis session
                         "session_state": {},
+
+                        # decision_node 결과
                         "intent": None,
+                        "next_action": None,
+                        "task_type": None,
+                        "use_knowledge": False,
+                        "decision_reason": None,
+                        "task_result": None,
+
+                        # 기존 should_use_knowledge_node와의 호환용
+                        "should_use_knowledge": False,
+
+                        # rules
                         "rules": [],
+                        "rule_instructions": "",
                         "applied_rules": [],
+
+                        # knowledge
                         "knowledge_context": [],
                         "used_knowledge": [],
+
+                        # final response
                         "final_response": None,
                     },
                     on_delta=send_delta,
                 )
 
                 # 8. AI 자동응답이 꺼져 있으면 AI 응답 완료 이벤트를 보내지 않는다.
-                #    고객 메시지는 이미 conversation_node에서 저장된 상태다.
+                # 고객 메시지는 이미 conversation_node에서 저장된 상태다.
                 if not result.get("ai_enabled", True):
                     await websocket.send_json(
                         {
@@ -134,7 +154,6 @@ async def websocket_chat(
                             "type": "done",
                         }
                     )
-
                     continue
 
                 # 9. AI 응답 완료 이벤트
@@ -142,7 +161,15 @@ async def websocket_chat(
                     {
                         "type": "ai_response_done",
                         "message": result.get("final_response"),
+
+                        # decision_node 결과
                         "intent": result.get("intent"),
+                        "next_action": result.get("next_action"),
+                        "task_type": result.get("task_type"),
+                        "use_knowledge": result.get("use_knowledge", False),
+                        "decision_reason": result.get("decision_reason"),
+
+                        # conversation / rules / knowledge
                         "conversation_id": result.get("conversation_id"),
                         "applied_rules": result.get("applied_rules", []),
                         "used_knowledge": result.get("used_knowledge", []),
