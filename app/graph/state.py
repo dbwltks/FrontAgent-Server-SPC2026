@@ -16,8 +16,26 @@ class AgentState(TypedDict):
     # Redis에서 불러온 세션 상태
     session_state: Dict[str, Any]
 
-    # Router Node에서 분류한 intent
+    # Decision Node에서 분류한 intent
+    # 예: pricing, reservation, handoff, faq, general
     intent: Optional[str]
+
+    # Decision Node에서 결정한 다음 행동
+    # 예: search_knowledge, run_task, handoff, respond_general
+    next_action: Optional[str]
+
+    # 실행할 태스크 종류
+    # 예: reservation_create, reservation_lookup, reservation_cancel, none
+    task_type: Optional[str]
+
+    # Knowledge 검색 여부
+    use_knowledge: bool
+
+    # Decision Node가 그렇게 판단한 이유
+    decision_reason: Optional[str]
+
+    # 나중에 task_node 실행 결과를 저장할 공간
+    task_result: Optional[Dict[str, Any]]
 
     # Rule Node에서 불러온 활성 규칙 목록
     # 예:

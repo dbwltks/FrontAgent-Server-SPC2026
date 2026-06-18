@@ -48,13 +48,14 @@ async def run_agent_streaming(
     # 4. 사용자 intent 분류
     state = router_node(state)
 
-    # 5. rule 적용
-    state = rule_node(state)
-
-    # 6. 등록 지식 RAG 검색
+    # 5. 등록 지식 RAG 검색
     state = knowledge_node(state)
 
-    # 7. streaming 응답용 instructions 생성 (이전 대화 맥락 포함)
+    # 6. rules 조회
+    # 최종 답변 생성 직전에 관리자가 등록한 응답 규칙을 가져온다.
+    state = rule_node(state)
+
+    # 7. streaming 응답용 instructions 생성
     instructions = build_response_instructions(
         intent=state.get("intent"),
         rules=state.get("rules", []),
