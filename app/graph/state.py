@@ -40,6 +40,9 @@ class AgentState(TypedDict):
     # 관리자 로그용으로 정리된 적용 규칙 이름 목록
     applied_rules: List[str]
 
+    # 현재 메시지가 Knowledge/RAG 검색을 필요로 하는지 여부
+    should_use_knowledge: bool
+
     # RAG 검색 결과 원본
     knowledge_context: List[Dict[str, Any]]
 

@@ -36,6 +36,7 @@ def chat(req: ChatRequest):
             "intent": None,
             "rules": [],
             "applied_rules": [],
+            "should_use_knowledge": False,
             "knowledge_context": [],
             "used_knowledge": [],
             "final_response": None,

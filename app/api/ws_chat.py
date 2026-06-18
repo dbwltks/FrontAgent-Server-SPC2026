@@ -111,6 +111,7 @@ async def websocket_chat(
                         "intent": None,
                         "rules": [],
                         "applied_rules": [],
+                        "should_use_knowledge": False,
                         "knowledge_context": [],
                         "used_knowledge": [],
                         "final_response": None,
