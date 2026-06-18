@@ -130,6 +130,21 @@ def get_knowledge_list(organization_id: str):
     }
 
 
+@router.get("/knowledge/{source_id}/chunks")
+def get_knowledge_chunks(source_id: str, organization_id: str):
+    chunks = list_knowledge_chunks(
+        organization_id=organization_id,
+        source_id=source_id,
+    )
+
+    return {
+        "organization_id": organization_id,
+        "source_id": source_id,
+        "count": len(chunks),
+        "items": chunks,
+    }
+
+
 @router.get("/knowledge/{source_id}")
 def get_knowledge_detail(source_id: str, organization_id: str):
     source = get_knowledge_source(
@@ -146,21 +161,6 @@ def get_knowledge_detail(source_id: str, organization_id: str):
     return source
 
 
-@router.get("/knowledge/{source_id}/chunks")
-def get_knowledge_chunks(source_id: str, organization_id: str):
-    chunks = list_knowledge_chunks(
-        organization_id=organization_id,
-        source_id=source_id,
-    )
-
-    return {
-        "organization_id": organization_id,
-        "source_id": source_id,
-        "count": len(chunks),
-        "items": chunks,
-    }
-
-
 @router.patch("/knowledge/{source_id}")
 def patch_knowledge_source(
     source_id: str,
@@ -169,8 +169,8 @@ def patch_knowledge_source(
 ):
     update_data = {
         key: value
-        for key, value in req.model_dump().items()
-        if value is not None
+        for key, value in req.model_dump(exclude_unset=True).items()
+        if value is not None or isinstance(value, bool)
     }
 
     if not update_data:
