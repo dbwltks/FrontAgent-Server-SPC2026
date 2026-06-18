@@ -1,10 +1,9 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
 from app.graph.state import AgentState
 from app.graph.nodes.load_session_node import load_session_node
 from app.graph.nodes.conversation_node import conversation_node
-from app.graph.nodes.router_node import router_node
-from app.graph.nodes.should_use_knowledge_node import should_use_knowledge_node
+from app.graph.nodes.decision_node import decision_node
 from app.graph.nodes.knowledge_node import knowledge_node
 from app.graph.nodes.rule_node import rule_node
 from app.graph.nodes.response_node import response_node
@@ -13,14 +12,21 @@ from app.graph.nodes.update_session_node import update_session_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
 
-def route_after_should_use_knowledge(state: AgentState) -> str:
+def route_after_decision(state: AgentState) -> str:
     """
-    Knowledge 검색이 필요한지에 따라 다음 노드를 결정한다.
+    decision_node가 결정한 next_action에 따라 다음 노드를 선택한다.
 
-    - True  → knowledge_node 실행
-    - False → knowledge_node를 건너뛰고 rule_node로 이동
+    현재 단계:
+    - search_knowledge → knowledge_node 실행
+    - run_task → 아직 task_node가 없으므로 rule_node로 이동
+    - handoff → 아직 handoff_node가 없으므로 rule_node로 이동
+    - respond_general → rule_node로 이동
+
+    나중에 task_node, handoff_node가 생기면 여기에서 연결만 바꾸면 된다.
     """
-    if state.get("should_use_knowledge", False):
+    next_action = state.get("next_action")
+
+    if next_action == "search_knowledge":
         return "knowledge"
 
     return "rule"
@@ -28,19 +34,18 @@ def route_after_should_use_knowledge(state: AgentState) -> str:
 
 def build_graph():
     """
-    Front Agent 기본 LangGraph 흐름을 만든다.
+    Front Agent의 기본 LangGraph 흐름을 만든다.
 
-    최종 흐름:
+    최종 목표 흐름:
     1. Redis 세션 로드
     2. 상담방 생성/조회 + 고객 메시지 저장
-    3. intent 분류
-    4. Knowledge 검색 필요 여부 판단
-    5. 필요하면 Knowledge 검색
-    6. rules 조회
-    7. AI 응답 생성
-    8. AI 메시지 저장
-    9. Redis 세션 업데이트
-    10. Agent Run Log 저장
+    3. decision_node에서 intent / next_action / task_type 판단
+    4. next_action이 search_knowledge면 Knowledge 검색
+    5. rules 조회
+    6. AI 응답 생성
+    7. AI 메시지 저장
+    8. Redis 세션 업데이트
+    9. Agent Run Log 저장
     """
 
     graph = StateGraph(AgentState)
@@ -48,8 +53,7 @@ def build_graph():
     # 노드 등록
     graph.add_node("load_session", load_session_node)
     graph.add_node("conversation", conversation_node)
-    graph.add_node("router", router_node)
-    graph.add_node("should_use_knowledge", should_use_knowledge_node)
+    graph.add_node("decision", decision_node)
     graph.add_node("knowledge", knowledge_node)
     graph.add_node("rule", rule_node)
     graph.add_node("response", response_node)
@@ -62,21 +66,22 @@ def build_graph():
 
     # 기본 흐름
     graph.add_edge("load_session", "conversation")
-    graph.add_edge("conversation", "router")
-    graph.add_edge("router", "should_use_knowledge")
+    graph.add_edge("conversation", "decision")
 
-    # Knowledge 필요 여부에 따라 분기
+    # decision 결과에 따라 Knowledge 검색 여부 결정
     graph.add_conditional_edges(
-        "should_use_knowledge",
-        route_after_should_use_knowledge,
+        "decision",
+        route_after_decision,
         {
             "knowledge": "knowledge",
             "rule": "rule",
         },
     )
 
-    # Knowledge를 탄 경우에도 최종적으로 rule을 조회한 뒤 response로 간다.
+    # Knowledge를 탄 경우에도 최종적으로 rule을 조회한다.
     graph.add_edge("knowledge", "rule")
+
+    # rule은 최종 응답 생성 직전에 조회한다.
     graph.add_edge("rule", "response")
 
     # 응답 저장 및 로그 저장
