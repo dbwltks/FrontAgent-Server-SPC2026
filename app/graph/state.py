@@ -1,7 +1,8 @@
-from typing import TypedDict, Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional, TypedDict
 
 
 class AgentState(TypedDict):
+    # 요청 기본 정보
     organization_id: str
     session_id: str
     user_message: str
@@ -18,10 +19,25 @@ class AgentState(TypedDict):
     # Router Node에서 분류한 intent
     intent: Optional[str]
 
-    # Rule Node에서 불러온 전체 규칙
+    # Rule Node에서 불러온 활성 규칙 목록
+    # 예:
+    # [
+    #   {
+    #     "id": "...",
+    #     "name": "반말하지 않기",
+    #     "instruction": "고객에게 절대 반말하지 않고 항상 존댓말로 응답한다."
+    #   }
+    # ]
     rules: List[Dict[str, Any]]
 
-    # 실제 적용된 rule 이름 목록
+    # AI 프롬프트에 넣기 좋게 정리된 규칙 지시문 문자열
+    # 예:
+    # [응답 규칙]
+    # 1. 반말하지 않기
+    # - 고객에게 절대 반말하지 않고 항상 존댓말로 응답한다.
+    rule_instructions: str
+
+    # 관리자 로그용으로 정리된 적용 규칙 이름 목록
     applied_rules: List[str]
 
     # RAG 검색 결과 원본
