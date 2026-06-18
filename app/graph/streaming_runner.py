@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 
 from app.graph.state import AgentState
@@ -18,36 +19,27 @@ from app.repositories.conversation_repo import list_conversation_messages
 
 HISTORY_LIMIT = 10
 
+TraceStepCallback = Callable[[str, str, str, list], Awaitable[None]] | None
+
 
 async def run_agent_streaming(
     initial_state: AgentState,
     on_delta: Callable[[str], Awaitable[None]],
+    on_trace_step: TraceStepCallback = None,
 ) -> AgentState:
-    """
-    WebSocket streaming 전용 Agent Runner.
-
-    HTTP /chat 그래프와 같은 decision_node 기반 흐름을 유지한다.
-
-    흐름:
-    1. Redis 세션 로드
-    2. 상담방 생성/조회 + 고객 메시지 저장
-    3. AI 자동응답 여부 확인
-    4. decision_node에서 intent / next_action / task_type 판단
-    5. next_action이 search_knowledge면 Knowledge 검색
-    6. rules 조회
-    7. rules + knowledge + session context 기반 instructions 생성
-    8. OpenAI streaming 응답 생성
-    9. 최종 응답 저장
-    10. Redis 세션 업데이트
-    11. agent_runs 로그 저장
-    """
     state = initial_state
+
+    async def emit(step: str, status: str, detail: str = "", items: list = []) -> None:
+        if on_trace_step:
+            await on_trace_step(step, status, detail, items)
 
     # 1. Redis 세션 로드
     state = load_session_node(state)
 
     # 2. 상담방 생성/조회 + 고객 메시지 저장
+    await emit("conversation", "active", "대화 세션 확인 중")
     state = conversation_node(state)
+    await emit("conversation", "done", f"conversation_id={state.get('conversation_id')}")
 
     # 3. AI 자동응답이 꺼져 있으면 여기서 중단
     if not state.get("ai_enabled", True):
@@ -59,35 +51,41 @@ async def run_agent_streaming(
         state["task_result"] = None
         state["should_use_knowledge"] = False
         state["final_response"] = None
-
         state["rules"] = []
         state["rule_instructions"] = ""
         state["applied_rules"] = []
-
         state["knowledge_context"] = []
         state["used_knowledge"] = []
-
-        # 고객 메시지는 이미 conversation_node에서 저장됨
-        # AI 메시지는 저장하지 않음
         return state
 
     # 4. decision_node에서 다음 처리 방향 판단
+    await emit("intent", "active", "의도 분석 중")
     state = decision_node(state)
+    await emit(
+        "intent",
+        "done",
+        f"intent={state.get('intent')}",
+        [state.get("decision_reason", "")],
+    )
 
     # 5. Knowledge 검색
-    # decision_node가 search_knowledge를 선택한 경우에만 지식 검색을 실행한다.
-    if state.get("next_action") == "search_knowledge" or state.get("use_knowledge", False):
+    next_action = state.get("next_action")
+    if next_action in ("search_knowledge", "run_task") or state.get("use_knowledge", False):
+        await emit("knowledge", "active", "지식 검색 중")
         state = knowledge_node(state)
+        sources = [k.get("source_title", "") for k in state.get("used_knowledge", [])]
+        await emit("knowledge", "done", f"{len(sources)}개 문서 참조", sources)
     else:
         state["knowledge_context"] = []
         state["used_knowledge"] = []
 
     # 6. rules 조회
-    # rules는 최종 응답 생성 직전에 조회한다.
+    await emit("rules", "active", "규칙 평가 중")
     state = rule_node(state)
+    rule_names = state.get("applied_rules", [])
+    await emit("rules", "done", f"{len(rule_names)}개 규칙 적용", rule_names)
 
     # 7. streaming 응답용 instructions 생성
-    # rules를 넘겨야 rule 이름뿐 아니라 실제 instruction까지 프롬프트에 들어간다.
     instructions = build_response_instructions(
         intent=state.get("intent"),
         rules=state.get("rules", []),
@@ -96,12 +94,13 @@ async def run_agent_streaming(
         session_state=state.get("session_state"),
     )
 
-    # 8. Supabase에서 이전 대화 히스토리 조회
+    # 8. 이전 대화 히스토리 조회
     conversation_history = []
-
     conversation_id = state.get("conversation_id")
+
     if conversation_id:
-        raw_messages = list_conversation_messages(
+        raw_messages = await asyncio.to_thread(
+            list_conversation_messages,
             organization_id=state["organization_id"],
             conversation_id=conversation_id,
             limit=HISTORY_LIMIT,
@@ -115,25 +114,15 @@ async def run_agent_streaming(
                 continue
 
             if sender == "customer":
-                conversation_history.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                    }
-                )
+                conversation_history.append({"role": "user", "content": message})
             elif sender == "ai":
-                conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "content": message,
-                    }
-                )
+                conversation_history.append({"role": "assistant", "content": message})
 
-    # 9. OpenAI 응답을 delta 단위로 받기
-    # 한 글자씩 보이는 streaming 방식은 그대로 유지한다.
+    # 9. OpenAI streaming 응답 생성
+    await emit("response", "active", "AI 응답 생성 중")
     chunks: list[str] = []
 
-    for delta in stream_text(
+    async for delta in stream_text(
         instructions=instructions,
         input_text=state["user_message"],
         conversation_history=conversation_history or None,
@@ -142,20 +131,18 @@ async def run_agent_streaming(
             continue
 
         chunks.append(delta)
-
-        # delta가 생성될 때마다 WebSocket으로 전달
         await on_delta(delta)
 
-    # 10. 전체 delta를 하나의 최종 응답으로 합치기
     state["final_response"] = "".join(chunks)
+    await emit("response", "done", "응답 생성 완료")
 
-    # 11. 완성된 AI 응답을 conversation_messages에 저장
+    # 10. AI 응답 저장
     state = save_ai_message_node(state)
 
-    # 12. Redis 세션 상태 업데이트
+    # 11. Redis 세션 업데이트
     state = update_session_node(state)
 
-    # 13. agent_runs 실행 로그 저장
+    # 12. agent_runs 로그 저장
     state = save_agent_run_node(state)
 
     return state
