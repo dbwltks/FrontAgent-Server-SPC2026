@@ -1,3 +1,5 @@
+import asyncio
+
 from app.graph.state import AgentState
 from app.graph.prompt_builder import (
     build_response_instructions,
@@ -28,7 +30,8 @@ async def response_node(state: AgentState) -> AgentState:
     conversation_history = []
 
     if conversation_id:
-        raw_messages = list_conversation_messages(
+        raw_messages = await asyncio.to_thread(
+            list_conversation_messages,
             organization_id=organization_id,
             conversation_id=conversation_id,
             limit=HISTORY_LIMIT,
