@@ -71,6 +71,45 @@ def build_knowledge_text(knowledge_context: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def build_knowledge_groups_text(knowledge_context_groups: list[dict] | None) -> str:
+    """
+    질문별 RAG 검색 결과를 AI instruction용 텍스트로 변환한다.
+    사용자가 여러 질문을 한 경우, 어떤 지식이 어떤 질문에 해당하는지 구분해준다.
+    """
+    if not knowledge_context_groups:
+        return "현재 참고할 수 있는 등록 지식이 없습니다."
+
+    lines: list[str] = []
+
+    for group_index, group in enumerate(knowledge_context_groups, start=1):
+        query = group.get("query") or f"하위 질문 {group_index}"
+        chunks = group.get("chunks", [])
+
+        lines.append(
+            f"[질문 {group_index}]\n"
+            f"사용자 하위 질문: {query}"
+        )
+
+        if not chunks:
+            lines.append("참고 지식: 현재 이 질문에 대해 참고할 수 있는 등록 지식이 없습니다.")
+            continue
+
+        chunk_lines: list[str] = ["참고 지식:"]
+
+        for chunk_index, item in enumerate(chunks, start=1):
+            source_title = item.get("source_title") or "Unknown source"
+            content = item.get("content") or ""
+
+            chunk_lines.append(
+                f"- 출처: {source_title}\n"
+                f"  내용: {content}"
+            )
+
+        lines.append("\n".join(chunk_lines))
+
+    return "\n\n".join(lines)
+
+
 def build_session_context_text(session_state: dict | None) -> str:
     """
     Redis에 저장된 이전 턴의 session_state를 AI instruction용 텍스트로 변환한다.
@@ -111,6 +150,7 @@ def build_session_context_text(session_state: dict | None) -> str:
 def build_response_instructions(
     intent: str | None,
     knowledge_context: list[dict],
+    knowledge_context_groups: list[dict] | None = None,
     session_state: dict | None = None,
     rules: list[dict] | None = None,
     rule_instructions: str | None = None,
@@ -134,7 +174,11 @@ def build_response_instructions(
     else:
         rules_text = build_rules_text(applied_rules or [])
 
-    knowledge_text = build_knowledge_text(knowledge_context)
+    if knowledge_context_groups:
+        knowledge_text = build_knowledge_groups_text(knowledge_context_groups)
+    else:
+        knowledge_text = build_knowledge_text(knowledge_context)
+
     session_context_text = build_session_context_text(session_state)
 
     return f"""
@@ -166,4 +210,6 @@ def build_response_instructions(
 - 가격, 예약, 일정 같은 정보는 등록된 지식에 있을 때만 확정적으로 말한다.
 - 예약 생성 태스크가 실제로 성공하기 전에는 예약 완료라고 말하지 않는다.
 - 이전 대화 맥락을 참고해 자연스럽게 이어서 답변하되, 이전 맥락과 다른 새 질문이면 새 질문을 우선한다.
+- 사용자가 여러 질문을 한 경우, 각 질문에 대해 빠뜨리지 말고 각각 답변한다.
+- 일부 질문에 대한 지식만 있으면, 아는 부분은 답변하고 모르는 부분만 담당자 확인이 필요하다고 안내한다.
 """.strip()
