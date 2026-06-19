@@ -187,6 +187,7 @@ def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
 def knowledge_node(state: AgentState) -> AgentState:
     user_message = state["user_message"]
     organization_id = state["organization_id"]
+    knowledge_folder_id = state.get("knowledge_folder_id")
 
     knowledge_queries = split_knowledge_queries(user_message)
 
@@ -197,6 +198,7 @@ def knowledge_node(state: AgentState) -> AgentState:
             organization_id=organization_id,
             query=query,
             match_count=MATCH_COUNT_PER_QUERY,
+            folder_id=knowledge_folder_id,
         )
 
         knowledge_context_groups.append(
@@ -205,18 +207,18 @@ def knowledge_node(state: AgentState) -> AgentState:
                 "chunks": chunks,
             }
         )
-        
+
     knowledge_context = merge_unique_chunks(knowledge_context_groups)
 
     state["knowledge_queries"] = knowledge_queries
     state["knowledge_context_groups"] = knowledge_context_groups
     state["knowledge_context"] = knowledge_context
-
     state["used_knowledge"] = [
         {
             "chunk_id": item.get("id"),
             "source_id": item.get("source_id"),
             "source_title": item.get("source_title"),
+            "folder_id": item.get("folder_id"),
             "similarity": item.get("similarity"),
         }
         for item in knowledge_context

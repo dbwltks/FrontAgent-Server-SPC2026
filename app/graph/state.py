@@ -70,6 +70,9 @@ class AgentState(TypedDict):
     # RAG 검색 결과 원본
     knowledge_context: List[Dict[str, Any]]
 
+    # 지식 폴더 제한 검색용
+    knowledge_folder_id: Optional[str]
+
     # 관리자 로그용으로 정리된 사용 지식 목록
     used_knowledge: List[Dict[str, Any]]
 

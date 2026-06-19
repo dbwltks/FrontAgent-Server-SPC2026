@@ -11,6 +11,8 @@ class ChatRequest(BaseModel):
     organization_id: str = Field(..., example="org_test")
     session_id: str = Field(..., example="chat_test")
     message: str = Field(..., example="안녕하세요")
+    folder_id: str | None = None
+    
 
 
 class ChatResponse(BaseModel):

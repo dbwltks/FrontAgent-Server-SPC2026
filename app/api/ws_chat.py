@@ -41,6 +41,7 @@ async def websocket_chat(
         while True:
             data = await websocket.receive_json()
             user_message = data.get("message")
+            knowledge_folder_id = data.get("folder_id")
 
             if not user_message:
                 await websocket.send_json(
@@ -100,6 +101,7 @@ async def websocket_chat(
                         "rules": [],
                         "rule_instructions": "",
                         "applied_rules": [],
+                        "knowledge_folder_id": knowledge_folder_id,
                         "knowledge_context": [],
                         "used_knowledge": [],
                         "final_response": None,

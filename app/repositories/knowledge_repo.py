@@ -1,14 +1,20 @@
 from app.core.db import supabase
 
 
-def list_knowledge_sources(organization_id: str) -> list[dict]:
-    result = (
+def list_knowledge_sources(
+    organization_id: str,
+    folder_id: str | None = None,
+) -> list[dict]:
+    query = (
         supabase.table("knowledge_sources")
         .select("*")
         .eq("organization_id", organization_id)
-        .order("created_at", desc=True)
-        .execute()
     )
+
+    if folder_id:
+        query = query.eq("folder_id", folder_id)
+
+    result = query.order("created_at", desc=True).execute()
 
     return result.data or []
 
