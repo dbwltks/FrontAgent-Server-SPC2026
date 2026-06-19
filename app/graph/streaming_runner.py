@@ -60,6 +60,7 @@ async def run_agent_streaming(
         state["applied_rules"] = []
         state["knowledge_context"] = []
         state["used_knowledge"] = []
+        await emit("block", "warning", "AI 자동응답 꺼짐 — 관리자 응답 대기")
         return state
 
     # 4. decision_node에서 다음 처리 방향 판단
@@ -68,7 +69,7 @@ async def run_agent_streaming(
     await emit(
         "intent",
         "done",
-        f"intent={state.get('intent')}",
+        f"intent={state.get('intent')} / next_action={state.get('next_action')} / task_type={state.get('task_type')}",
         [state.get("decision_reason", "")],
     )
 
@@ -77,8 +78,26 @@ async def run_agent_streaming(
     if next_action in ("search_knowledge", "run_task") or state.get("use_knowledge", False):
         await emit("knowledge", "active", "지식 검색 중")
         state = knowledge_node(state)
+        groups = state.get("knowledge_context_groups", [])
         sources = [k.get("source_title", "") for k in state.get("used_knowledge", [])]
-        await emit("knowledge", "done", f"{len(sources)}개 문서 참조", sources)
+        await emit(
+            "knowledge",
+            "done",
+            f"{len(state.get('knowledge_queries', []))}개 질문 / {len(sources)}개 문서 참조",
+            [
+                {
+                    "query": g.get("query"),
+                    "chunks": [
+                        {
+                            "source_title": c.get("source_title"),
+                            "similarity": c.get("similarity"),
+                        }
+                        for c in g.get("chunks", [])
+                    ],
+                }
+                for g in groups
+            ],
+        )
     else:
         state["knowledge_context"] = []
         state["used_knowledge"] = []
@@ -91,8 +110,35 @@ async def run_agent_streaming(
     rule_instructions = build_rule_instructions_text(state.get("rules", []))
     state["rule_instructions"] = rule_instructions
 
-    rule_names = state.get("applied_rules", [])
-    await emit("rules", "done", f"{len(rule_names)}개 규칙 적용", rule_names)
+    rules = state.get("rules", [])
+    await emit(
+        "rules",
+        "done",
+        f"{len(rules)}개 규칙 적용",
+        [
+            {
+                "name": r.get("name", "unnamed"),
+                "action_type": r.get("action_type", ""),
+                "trigger_condition": r.get("trigger_condition", ""),
+            }
+            for r in rules
+        ],
+    )
+
+    # 6-b. block/handoff action_type인 규칙 존재 시 별도 block step emit
+    blocking_rules = [
+        r for r in rules if r.get("action_type") in ("block", "handoff")
+    ]
+    if blocking_rules:
+        for r in blocking_rules:
+            action_type = r.get("action_type")
+            rule_name = r.get("name", "unnamed")
+            await emit(
+                "block",
+                "warning",
+                f"규칙 '{rule_name}' — {action_type} 액션 적용",
+                [{"name": rule_name, "action_type": action_type}],
+            )
 
     # 7. streaming 응답용 instructions 생성
     instructions = build_response_instructions(
@@ -144,8 +190,9 @@ async def run_agent_streaming(
         chunks.append(delta)
         await on_delta(delta)
 
-    state["final_response"] = "".join(chunks)
-    await emit("response", "done", "응답 생성 완료")
+    final_response = "".join(chunks)
+    state["final_response"] = final_response
+    await emit("response", "done", f"응답 생성 완료 ({len(final_response)}자)")
 
     # 10. AI 응답 저장
     state = save_ai_message_node(state)
