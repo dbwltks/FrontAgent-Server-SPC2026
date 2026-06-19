@@ -33,8 +33,8 @@ def find_chunk_end(text: str, start: int, chunk_size: int) -> int:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 800,
-    overlap: int = 100,
+    chunk_size: int = 600,
+    overlap: int = 80,
 ) -> list[str]:
     """
     텍스트를 일정 크기의 chunk로 나눈다.

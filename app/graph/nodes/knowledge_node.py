@@ -184,7 +184,7 @@ def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
     return merged
 
 
-def knowledge_node(state: AgentState) -> AgentState:
+async def knowledge_node(state: AgentState) -> AgentState:
     user_message = state["user_message"]
     organization_id = state["organization_id"]
     knowledge_folder_id = state.get("knowledge_folder_id")
@@ -194,7 +194,7 @@ def knowledge_node(state: AgentState) -> AgentState:
     knowledge_context_groups: list[dict] = []
 
     for query in knowledge_queries:
-        chunks = retrieve_knowledge(
+        chunks = await retrieve_knowledge(
             organization_id=organization_id,
             query=query,
             match_count=MATCH_COUNT_PER_QUERY,

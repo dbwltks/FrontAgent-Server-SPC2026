@@ -11,15 +11,16 @@ from app.providers.embedding_provider import create_embedding
 # threshold 필터링 후에도 match_count개를 채울 수 있도록 여유분을 더 가져온다.
 OVERFETCH_MULTIPLIER = 4
 
+SIMILARITY_THRESHOLD = 0.35
 
-def retrieve_knowledge(
+
+async def retrieve_knowledge(
     organization_id: str,
     query: str,
     match_count: int = 5,
-    similarity_threshold: float = 0.1,
     folder_id: str | None = None,
 ) -> list[dict]:
-    query_embedding = create_embedding(query)
+    query_embedding = await create_embedding(query)
 
     rpc_params = {
         "query_embedding": query_embedding,
@@ -38,7 +39,7 @@ def retrieve_knowledge(
     filtered_rows = [
         row
         for row in rows
-        if row.get("similarity", 0) >= similarity_threshold
+        if row.get("similarity", 0) >= SIMILARITY_THRESHOLD
     ]
 
     return filtered_rows[:match_count]
