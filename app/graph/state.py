@@ -50,6 +50,12 @@ class AgentState(TypedDict):
     # 관리자 로그용으로 정리된 적용 규칙 이름 목록
     applied_rules: List[str]
 
+    # 질문 분해 결과
+    knowledge_queries: List[str]
+
+    # 질문별 RAG 검색 결과
+    knowledge_context_groups: List[Dict[str, Any]]
+
     # RAG 검색 결과 원본
     knowledge_context: List[Dict[str, Any]]
 
@@ -58,3 +64,4 @@ class AgentState(TypedDict):
 
     # 최종 AI 응답
     final_response: Optional[str]
+    

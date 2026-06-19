@@ -12,7 +12,11 @@ from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.update_session_node import update_session_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
-from app.graph.prompt_builder import build_response_instructions
+from app.graph.prompt_builder import (
+    build_response_instructions,
+    build_rule_instructions_text,
+)
+
 from app.providers.openai_streaming_provider import stream_text
 from app.repositories.conversation_repo import list_conversation_messages
 
@@ -81,7 +85,12 @@ async def run_agent_streaming(
 
     # 6. rules 조회
     await emit("rules", "active", "규칙 평가 중")
+
     state = rule_node(state)
+
+    rule_instructions = build_rule_instructions_text(state.get("rules", []))
+    state["rule_instructions"] = rule_instructions
+
     rule_names = state.get("applied_rules", [])
     await emit("rules", "done", f"{len(rule_names)}개 규칙 적용", rule_names)
 
@@ -89,8 +98,10 @@ async def run_agent_streaming(
     instructions = build_response_instructions(
         intent=state.get("intent"),
         rules=state.get("rules", []),
+        rule_instructions=state.get("rule_instructions"),
         applied_rules=state.get("applied_rules", []),
         knowledge_context=state.get("knowledge_context", []),
+        knowledge_context_groups=state.get("knowledge_context_groups", []),
         session_state=state.get("session_state"),
     )
 
