@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 
@@ -98,11 +99,7 @@ def parse_json_array(text: str) -> list[str]:
     return queries
 
 
-def split_knowledge_queries(user_message: str) -> list[str]:
-    """
-    사용자 메시지에서 지식 검색이 필요한 정보 문의를 최대 3개까지 분리한다.
-    업종별 키워드를 하드코딩하지 않고 LLM이 의미 기준으로 분해한다.
-    """
+async def split_knowledge_queries(user_message: str) -> list[str]:
     message = (user_message or "").strip()
 
     if not message:
@@ -141,7 +138,7 @@ def split_knowledge_queries(user_message: str) -> list[str]:
 """.strip()
 
     try:
-        llm_result = generate_text(
+        llm_result = await generate_text(
             instructions=instructions,
             user_message=message,
         )
@@ -189,24 +186,24 @@ async def knowledge_node(state: AgentState) -> AgentState:
     organization_id = state["organization_id"]
     knowledge_folder_id = state.get("knowledge_folder_id")
 
-    knowledge_queries = split_knowledge_queries(user_message)
+    knowledge_queries = await split_knowledge_queries(user_message)
 
-    knowledge_context_groups: list[dict] = []
+    results = await asyncio.gather(
+        *[
+            retrieve_knowledge(
+                organization_id=organization_id,
+                query=query,
+                match_count=MATCH_COUNT_PER_QUERY,
+                folder_id=knowledge_folder_id,
+            )
+            for query in knowledge_queries
+        ]
+    )
 
-    for query in knowledge_queries:
-        chunks = await retrieve_knowledge(
-            organization_id=organization_id,
-            query=query,
-            match_count=MATCH_COUNT_PER_QUERY,
-            folder_id=knowledge_folder_id,
-        )
-
-        knowledge_context_groups.append(
-            {
-                "query": query,
-                "chunks": chunks,
-            }
-        )
+    knowledge_context_groups = [
+        {"query": query, "chunks": chunks}
+        for query, chunks in zip(knowledge_queries, results)
+    ]
 
     knowledge_context = merge_unique_chunks(knowledge_context_groups)
 

@@ -37,9 +37,9 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
     try:
-        result = agent_graph.invoke(
+        result = await agent_graph.ainvoke(
             {
                 "organization_id": req.organization_id,
                 "session_id": req.session_id,

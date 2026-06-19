@@ -138,17 +138,11 @@ def parse_decision_result(raw_result: str) -> dict:
     }
 
 
-def decision_node(state: AgentState) -> AgentState:
-    """
-    고객 메시지를 보고 다음 처리 방향을 결정한다.
-
-    기존 router_node + should_use_knowledge_node 역할을 통합한다.
-    나중에 task_node가 생기면 next_action과 task_type을 기준으로 연결하면 된다.
-    """
-    raw_result = generate_text(
+async def decision_node(state: AgentState) -> AgentState:
+    raw_result = (await generate_text(
         instructions=DECISION_INSTRUCTIONS,
         user_message=state["user_message"],
-    ).strip()
+    )).strip()
 
     decision = parse_decision_result(raw_result)
 

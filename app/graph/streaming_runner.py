@@ -65,7 +65,7 @@ async def run_agent_streaming(
 
     # 4. decision_node에서 다음 처리 방향 판단
     await emit("intent", "active", "의도 분석 중")
-    state = decision_node(state)
+    state = await decision_node(state)
     await emit(
         "intent",
         "done",
