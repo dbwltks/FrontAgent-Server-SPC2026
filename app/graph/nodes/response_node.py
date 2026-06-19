@@ -27,6 +27,7 @@ def response_node(state: AgentState) -> AgentState:
     applied_rules = state.get("applied_rules", [])
 
     knowledge_context = state.get("knowledge_context", [])
+    knowledge_context_groups = state.get("knowledge_context_groups", [])
     session_state = state.get("session_state")
 
     user_message = state["user_message"]
@@ -79,6 +80,7 @@ def response_node(state: AgentState) -> AgentState:
     instructions = build_response_instructions(
         intent=intent,
         knowledge_context=knowledge_context,
+        knowledge_context_groups=knowledge_context_groups,
         session_state=session_state,
         rules=rules,
         rule_instructions=rule_instructions,

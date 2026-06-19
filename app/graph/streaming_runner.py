@@ -101,6 +101,7 @@ async def run_agent_streaming(
         rule_instructions=state.get("rule_instructions"),
         applied_rules=state.get("applied_rules", []),
         knowledge_context=state.get("knowledge_context", []),
+        knowledge_context_groups=state.get("knowledge_context_groups", []),
         session_state=state.get("session_state"),
     )
 
