@@ -15,24 +15,29 @@ OVERFETCH_MULTIPLIER = 4
 def retrieve_knowledge(
     organization_id: str,
     query: str,
-    match_count: int = 5, # 반환할 chunk 개수
-    similarity_threshold: float = 0.1, # 유사도 임계값  
+    match_count: int = 5,
+    similarity_threshold: float = 0.1,
+    folder_id: str | None = None,
 ) -> list[dict]:
     query_embedding = create_embedding(query)
 
+    rpc_params = {
+        "query_embedding": query_embedding,
+        "match_organization_id": organization_id,
+        "match_count": match_count * OVERFETCH_MULTIPLIER,
+        "match_folder_id": folder_id,
+    }
+
     result = supabase.rpc(
         "match_knowledge_chunks",
-        {
-            "query_embedding": query_embedding,
-            "match_organization_id": organization_id,
-            "match_count": match_count * OVERFETCH_MULTIPLIER,
-        },
+        rpc_params,
     ).execute()
 
     rows = result.data or []
 
     filtered_rows = [
-        row for row in rows
+        row
+        for row in rows
         if row.get("similarity", 0) >= similarity_threshold
     ]
 

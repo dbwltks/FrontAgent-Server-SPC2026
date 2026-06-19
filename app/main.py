@@ -1,8 +1,16 @@
 from fastapi import FastAPI
 
 from app.core.config import settings
-from app.api import health, chat, knowledge, agent_runs, conversations, ws_chat, rules
-
+from app.api import (
+    health,
+    chat,
+    knowledge,
+    knowledge_folders,
+    agent_runs,
+    conversations,
+    ws_chat,
+    rules,
+)
 
 app = FastAPI(
     title=settings.app_name,
@@ -15,9 +23,11 @@ app.include_router(health.router)
 # HTTP 채팅 API
 app.include_router(chat.router)
 
-# 새로 추가 26.06.17 밤
 # AI 응답 규칙 관리 API
 app.include_router(rules.router)
+
+# 지식 폴더 관리 API
+app.include_router(knowledge_folders.router)
 
 # 지식 관리 API
 app.include_router(knowledge.router)
@@ -30,5 +40,4 @@ app.include_router(conversations.router)
 
 # 사용자 채팅 WebSocket API
 app.include_router(ws_chat.router)
-
 

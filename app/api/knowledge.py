@@ -120,11 +120,18 @@ async def upload_knowledge(
 
 
 @router.get("/knowledge")
-def get_knowledge_list(organization_id: str):
-    sources = list_knowledge_sources(organization_id)
+def get_knowledge_list(
+    organization_id: str,
+    folder_id: str | None = None,
+):
+    sources = list_knowledge_sources(
+        organization_id=organization_id,
+        folder_id=folder_id,
+    )
 
     return {
         "organization_id": organization_id,
+        "folder_id": folder_id,
         "count": len(sources),
         "items": sources,
     }
