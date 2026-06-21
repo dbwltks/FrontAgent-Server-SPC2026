@@ -3,6 +3,7 @@ from langgraph.graph import END, StateGraph
 from app.graph.state import AgentState
 from app.graph.nodes.load_session_node import load_session_node
 from app.graph.nodes.conversation_node import conversation_node
+from app.graph.nodes.load_history_node import load_history_node
 from app.graph.nodes.decision_node import decision_node
 from app.graph.nodes.knowledge_node import knowledge_node
 from app.graph.nodes.rule_node import rule_node
@@ -39,13 +40,14 @@ def build_graph():
     최종 목표 흐름:
     1. Redis 세션 로드
     2. 상담방 생성/조회 + 고객 메시지 저장
-    3. decision_node에서 intent / next_action / task_type 판단
-    4. next_action이 search_knowledge면 Knowledge 검색
-    5. rules 조회
-    6. AI 응답 생성
-    7. AI 메시지 저장
-    8. Redis 세션 업데이트
-    9. Agent Run Log 저장
+    3. Supabase 대화 히스토리 조회 (decision/response 노드가 공유)
+    4. decision_node에서 intent / next_action / task_type / knowledge_queries 판단
+    5. next_action이 search_knowledge면 Knowledge 검색 (질문 분해는 decision_node 결과 재사용)
+    6. rules 조회
+    7. AI 응답 생성
+    8. AI 메시지 저장
+    9. Redis 세션 업데이트
+    10. Agent Run Log 저장
     """
 
     graph = StateGraph(AgentState)
@@ -53,6 +55,7 @@ def build_graph():
     # 노드 등록
     graph.add_node("load_session", load_session_node)
     graph.add_node("conversation", conversation_node)
+    graph.add_node("load_history", load_history_node)
     graph.add_node("decision", decision_node)
     graph.add_node("knowledge", knowledge_node)
     graph.add_node("rule", rule_node)
@@ -66,7 +69,8 @@ def build_graph():
 
     # 기본 흐름
     graph.add_edge("load_session", "conversation")
-    graph.add_edge("conversation", "decision")
+    graph.add_edge("conversation", "load_history")
+    graph.add_edge("load_history", "decision")
 
     # decision 결과에 따라 Knowledge 검색 여부 결정
     graph.add_conditional_edges(

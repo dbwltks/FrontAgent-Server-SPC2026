@@ -1,11 +1,13 @@
 import asyncio
-import json
+import logging
 import re
 
 from app.graph.state import AgentState
-from app.providers.openai_provider import generate_text
 from app.rag.retriever import retrieve_knowledge
 from app.repositories.knowledge_repo import increment_reference_counts
+
+
+logger = logging.getLogger(__name__)
 
 
 MAX_KNOWLEDGE_QUERIES = 3
@@ -50,110 +52,6 @@ def fallback_split_knowledge_queries(user_message: str) -> list[str]:
     return queries or [message]
 
 
-def parse_json_array(text: str) -> list[str]:
-    """
-    LLM 응답에서 JSON 배열만 안전하게 추출한다.
-    """
-    if not text:
-        return []
-
-    cleaned = text.strip()
-    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r"\[[\s\S]*\]", cleaned)
-
-        if not match:
-            return []
-
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return []
-
-    if not isinstance(data, list):
-        return []
-
-    queries: list[str] = []
-
-    for item in data:
-        if not isinstance(item, str):
-            continue
-
-        query = item.strip()
-
-        if not query:
-            continue
-
-        if len(query) < 2:
-            continue
-
-        if query not in queries:
-            queries.append(query)
-
-        if len(queries) >= MAX_KNOWLEDGE_QUERIES:
-            break
-
-    return queries
-
-
-async def split_knowledge_queries(user_message: str) -> list[str]:
-    message = (user_message or "").strip()
-
-    if not message:
-        return []
-
-    instructions = f"""
-너는 사용자 메시지를 지식 검색용 질문 배열로 분해하는 분류기다.
-
-목표:
-- 사용자가 여러 정보를 한 번에 물어보면 서로 다른 정보 문의를 최대 {MAX_KNOWLEDGE_QUERIES}개까지 분리한다.
-- 각 항목은 knowledge 검색에 바로 사용할 수 있는 짧고 명확한 한국어 질문으로 만든다.
-- 예약 실행 요청, 예약 변경 요청, 예약 취소 요청, 상담사 연결 요청, 단순 인사는 지식 검색 질문으로 만들지 않는다.
-- 정보 문의와 예약 요청이 섞여 있으면 정보 문의만 배열에 담는다.
-- 같은 의미의 질문은 중복 제거한다.
-- 출력은 반드시 JSON 배열만 반환한다.
-- 설명 문장, markdown, 코드블록은 절대 붙이지 않는다.
-
-예시 1:
-입력: "강아지 데려가도 돼? 그리고 프리미엄 청소 가격도 알려줘, 하계 학술대회 정보도"
-출력: ["강아지 데려가도 돼?", "프리미엄 청소 가격 알려줘", "하계 학술대회 정보 알려줘"]
-
-예시 2:
-입력: "프리미엄 청소 얼마야? 그리고 내일 예약하고 싶어"
-출력: ["프리미엄 청소 가격 알려줘"]
-
-예시 3:
-입력: "내일 오후 3시에 이상욱 이름으로 예약해줘"
-출력: []
-
-예시 4:
-입력: "안녕하세요"
-출력: []
-
-사용자 메시지:
-{message}
-""".strip()
-
-    try:
-        llm_result = await generate_text(
-            instructions=instructions,
-            user_message=message,
-        )
-
-        queries = parse_json_array(llm_result)
-
-        if queries:
-            return queries[:MAX_KNOWLEDGE_QUERIES]
-
-        return fallback_split_knowledge_queries(message)
-
-    except Exception:
-        return fallback_split_knowledge_queries(message)
-
-
 def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
     """
     질문별 검색 결과를 기존 knowledge_context 구조와 호환되도록 하나의 배열로 합친다.
@@ -182,12 +80,19 @@ def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
 
 
 async def knowledge_node(state: AgentState) -> AgentState:
+    """
+    질문 분해는 decision_node가 intent 분류와 함께 이미 수행해
+    state["knowledge_queries"]에 채워준다.
+    decision_node가 비어 있는 채로 넘기거나(use_knowledge=False 등) 호출되지 않은
+    경로(예: 기존 그래프 테스트)에서는 fallback으로 최소 분해를 시도한다.
+    """
     user_message = state["user_message"]
     organization_id = state["organization_id"]
     knowledge_folder_id = state.get("knowledge_folder_id")
 
-    knowledge_queries = await split_knowledge_queries(user_message)
+    knowledge_queries = state.get("knowledge_queries") or fallback_split_knowledge_queries(user_message)
 
+    # 질문 하나의 검색(임베딩 API/Supabase RPC) 실패가 다른 질문 결과까지 막지 않게 한다.
     results = await asyncio.gather(
         *[
             retrieve_knowledge(
@@ -197,13 +102,18 @@ async def knowledge_node(state: AgentState) -> AgentState:
                 folder_id=knowledge_folder_id,
             )
             for query in knowledge_queries
-        ]
+        ],
+        return_exceptions=True,
     )
 
-    knowledge_context_groups = [
-        {"query": query, "chunks": chunks}
-        for query, chunks in zip(knowledge_queries, results)
-    ]
+    knowledge_context_groups = []
+
+    for query, result in zip(knowledge_queries, results):
+        if isinstance(result, Exception):
+            logger.warning("knowledge retrieval failed for query=%r", query, exc_info=result)
+            knowledge_context_groups.append({"query": query, "chunks": []})
+        else:
+            knowledge_context_groups.append({"query": query, "chunks": result})
 
     knowledge_context = merge_unique_chunks(knowledge_context_groups)
 
