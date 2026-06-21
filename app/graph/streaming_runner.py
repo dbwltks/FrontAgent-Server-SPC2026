@@ -1,10 +1,11 @@
-import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 
 from app.graph.state import AgentState
 
 from app.graph.nodes.load_session_node import load_session_node
 from app.graph.nodes.conversation_node import conversation_node
+from app.graph.nodes.load_history_node import load_history_node
 from app.graph.nodes.decision_node import decision_node
 from app.graph.nodes.knowledge_node import knowledge_node
 from app.graph.nodes.rule_node import rule_node
@@ -18,10 +19,11 @@ from app.graph.prompt_builder import (
 )
 
 from app.providers.openai_streaming_provider import stream_text
-from app.repositories.conversation_repo import list_conversation_messages
 
 
-HISTORY_LIMIT = 10
+logger = logging.getLogger(__name__)
+
+FALLBACK_RESPONSE = "일시적인 오류로 답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
 
 TraceStepCallback = Callable[[str, str, str, list], Awaitable[None]] | None
 
@@ -44,6 +46,9 @@ async def run_agent_streaming(
     await emit("conversation", "active", "대화 세션 확인 중")
     state = conversation_node(state)
     await emit("conversation", "done", f"conversation_id={state.get('conversation_id')}")
+
+    # 2-b. 대화 히스토리 조회 (decision_node/응답 생성이 공유)
+    state = load_history_node(state)
 
     # 3. AI 자동응답이 꺼져 있으면 여기서 중단
     if not state.get("ai_enabled", True):
@@ -151,44 +156,29 @@ async def run_agent_streaming(
         session_state=state.get("session_state"),
     )
 
-    # 8. 이전 대화 히스토리 조회
-    conversation_history = []
-    conversation_id = state.get("conversation_id")
-
-    if conversation_id:
-        raw_messages = await asyncio.to_thread(
-            list_conversation_messages,
-            organization_id=state["organization_id"],
-            conversation_id=conversation_id,
-            limit=HISTORY_LIMIT,
-        )
-
-        for msg in raw_messages:
-            sender = msg.get("sender_type")
-            message = msg.get("message")
-
-            if not message:
-                continue
-
-            if sender == "customer":
-                conversation_history.append({"role": "user", "content": message})
-            elif sender == "ai":
-                conversation_history.append({"role": "assistant", "content": message})
+    # 8. 대화 히스토리는 2-b에서 이미 조회해둔 값을 재사용한다.
+    conversation_history = state.get("conversation_history", [])
 
     # 9. OpenAI streaming 응답 생성
     await emit("response", "active", "AI 응답 생성 중")
     chunks: list[str] = []
 
-    async for delta in stream_text(
-        instructions=instructions,
-        input_text=state["user_message"],
-        conversation_history=conversation_history or None,
-    ):
-        if not delta:
-            continue
+    try:
+        async for delta in stream_text(
+            instructions=instructions,
+            input_text=state["user_message"],
+            conversation_history=conversation_history or None,
+        ):
+            if not delta:
+                continue
 
-        chunks.append(delta)
-        await on_delta(delta)
+            chunks.append(delta)
+            await on_delta(delta)
+    except Exception:
+        logger.warning("streaming response LLM call failed", exc_info=True)
+        if not chunks:
+            chunks = [FALLBACK_RESPONSE]
+            await on_delta(FALLBACK_RESPONSE)
 
     final_response = "".join(chunks)
     state["final_response"] = final_response

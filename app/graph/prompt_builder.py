@@ -112,10 +112,10 @@ def build_knowledge_groups_text(knowledge_context_groups: list[dict] | None) -> 
 
 def build_session_context_text(session_state: dict | None) -> str:
     """
-    Redis에 저장된 이전 턴의 session_state를 AI instruction용 텍스트로 변환한다.
+    Redis에 저장된 session_state를 AI instruction용 텍스트로 변환한다.
 
-    이전 응답, 이전 intent, 진행 중인 task 등을 AI가 멀티턴 대화 맥락으로
-    참고할 수 있게 한다.
+    직전 메시지/응답 자체는 conversation_history(메시지 배열)로 이미 전달되므로
+    여기서는 대화 히스토리로 표현되지 않는 구조화된 상태(intent, 진행 중인 task)만 다룬다.
     """
 
     if not session_state:
@@ -124,16 +124,8 @@ def build_session_context_text(session_state: dict | None) -> str:
     lines = []
 
     last_intent = session_state.get("last_intent")
-    last_user_message = session_state.get("last_user_message")
-    last_response = session_state.get("last_response")
     active_task = session_state.get("active_task")
     step = session_state.get("step")
-
-    if last_user_message:
-        lines.append(f"이전 고객 메시지: {last_user_message}")
-
-    if last_response:
-        lines.append(f"이전 AI 응답: {last_response}")
 
     if last_intent:
         lines.append(f"이전 intent: {last_intent}")

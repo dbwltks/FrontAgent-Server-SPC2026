@@ -91,6 +91,7 @@ async def websocket_chat(
                         "conversation_id": None,
                         "ai_enabled": True,
                         "session_state": {},
+                        "conversation_history": [],
                         "intent": None,
                         "next_action": None,
                         "task_type": None,

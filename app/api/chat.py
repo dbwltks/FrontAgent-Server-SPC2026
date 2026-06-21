@@ -47,6 +47,7 @@ async def chat(req: ChatRequest):
                 "conversation_id": None,
                 "ai_enabled": True,
                 "session_state": {},
+                "conversation_history": [],
 
                 # decision_node 결과
                 "intent": None,

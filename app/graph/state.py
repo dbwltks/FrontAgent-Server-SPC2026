@@ -16,6 +16,10 @@ class AgentState(TypedDict):
     # Redis에서 불러온 세션 상태
     session_state: Dict[str, Any]
 
+    # Supabase에서 불러온 최근 대화 히스토리 (OpenAI role/content 형식)
+    # conversation_node 다음 단계에서 한 번만 조회해 decision_node/response_node가 공유한다.
+    conversation_history: List[Dict[str, str]]
+
     # Decision Node에서 분류한 intent
     # 예: pricing, reservation, handoff, faq, general
     intent: Optional[str]

@@ -174,23 +174,30 @@ def list_conversation_messages(
     organization_id: str,
     conversation_id: str,
     limit: int = 100,
+    latest: bool = False,
 ) -> list[dict]:
     """
     특정 상담방의 메시지 목록을 조회한다.
 
     채팅방 상세 화면에서 사용한다.
+
+    latest=True면 가장 최근 메시지 limit개를 가져온 뒤
+    시간순(오래된 것 → 최신)으로 정렬해 반환한다.
+    AI 응답 생성용 history 조회에 사용한다.
     """
 
-    result = (
+    query = (
         supabase.table("conversation_messages")
         .select("*")
         .eq("organization_id", organization_id)
         .eq("conversation_id", conversation_id)
-        .order("created_at")
-        .limit(limit)
-        .execute()
     )
 
+    if latest:
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(result.data or []))
+
+    result = query.order("created_at").limit(limit).execute()
     return result.data or []
 
 

@@ -1,4 +1,4 @@
-import asyncio
+import logging
 
 from app.graph.state import AgentState
 from app.graph.prompt_builder import (
@@ -6,10 +6,11 @@ from app.graph.prompt_builder import (
     build_rule_instructions_text,
 )
 from app.providers.openai_provider import generate_text
-from app.repositories.conversation_repo import list_conversation_messages
 
 
-HISTORY_LIMIT = 10  # 최근 N개 메시지만 컨텍스트로 사용
+logger = logging.getLogger(__name__)
+
+FALLBACK_RESPONSE = "일시적인 오류로 답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
 
 
 async def response_node(state: AgentState) -> AgentState:
@@ -23,45 +24,9 @@ async def response_node(state: AgentState) -> AgentState:
     session_state = state.get("session_state")
 
     user_message = state["user_message"]
-    organization_id = state["organization_id"]
-    conversation_id = state.get("conversation_id")
 
-    # Supabase에서 이전 대화 히스토리 조회
-    conversation_history = []
-
-    if conversation_id:
-        raw_messages = await asyncio.to_thread(
-            list_conversation_messages,
-            organization_id=organization_id,
-            conversation_id=conversation_id,
-            limit=HISTORY_LIMIT,
-        )
-
-        # sender_type → OpenAI role 변환
-        # customer = user
-        # ai = assistant
-        for msg in raw_messages:
-            sender = msg.get("sender_type")
-            message = msg.get("message")
-
-            if not message:
-                continue
-
-            if sender == "customer":
-                conversation_history.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                    }
-                )
-
-            elif sender == "ai":
-                conversation_history.append(
-                    {
-                        "role": "assistant",
-                        "content": message,
-                    }
-                )
+    # load_history_node에서 이미 조회해둔 히스토리를 재사용한다.
+    conversation_history = state.get("conversation_history", [])
 
     # rules 목록을 AI 프롬프트에 넣기 좋은 문자열로 변환
     rule_instructions = state.get("rule_instructions")
@@ -80,11 +45,15 @@ async def response_node(state: AgentState) -> AgentState:
         applied_rules=applied_rules,
     )
 
-    final_response = await generate_text(
-        instructions=instructions,
-        user_message=user_message,
-        conversation_history=conversation_history or None,
-    )
+    try:
+        final_response = await generate_text(
+            instructions=instructions,
+            user_message=user_message,
+            conversation_history=conversation_history or None,
+        )
+    except Exception:
+        logger.warning("response_node LLM call failed", exc_info=True)
+        final_response = FALLBACK_RESPONSE
 
     state["final_response"] = final_response
 
