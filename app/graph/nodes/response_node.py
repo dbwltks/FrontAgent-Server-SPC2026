@@ -1,3 +1,5 @@
+import asyncio
+
 from app.graph.state import AgentState
 from app.graph.prompt_builder import (
     build_response_instructions,
@@ -10,17 +12,7 @@ from app.repositories.conversation_repo import list_conversation_messages
 HISTORY_LIMIT = 10  # 최근 N개 메시지만 컨텍스트로 사용
 
 
-def response_node(state: AgentState) -> AgentState:
-    """
-    최종 AI 응답을 생성하는 노드.
-
-    이번 구조에서는 AI가 답변하기 전에 다음 정보를 함께 참고한다.
-    - intent
-    - 이전 대화 맥락 session_state
-    - RAG 검색 결과 knowledge_context
-    - 관리자가 등록한 rules 지시문
-    """
-
+async def response_node(state: AgentState) -> AgentState:
     intent = state.get("intent")
 
     rules = state.get("rules", [])
@@ -38,7 +30,8 @@ def response_node(state: AgentState) -> AgentState:
     conversation_history = []
 
     if conversation_id:
-        raw_messages = list_conversation_messages(
+        raw_messages = await asyncio.to_thread(
+            list_conversation_messages,
             organization_id=organization_id,
             conversation_id=conversation_id,
             limit=HISTORY_LIMIT,
@@ -87,7 +80,7 @@ def response_node(state: AgentState) -> AgentState:
         applied_rules=applied_rules,
     )
 
-    final_response = generate_text(
+    final_response = await generate_text(
         instructions=instructions,
         user_message=user_message,
         conversation_history=conversation_history or None,

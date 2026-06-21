@@ -19,11 +19,11 @@ ROUTER_INSTRUCTIONS = f"""
 """.strip()
 
 
-def router_node(state: AgentState) -> AgentState:
-    result = generate_text(
+async def router_node(state: AgentState) -> AgentState:
+    result = (await generate_text(
         instructions=ROUTER_INSTRUCTIONS,
         user_message=state["user_message"],
-    ).strip().lower()
+    )).strip().lower()
 
     intent = result if result in INTENT_LIST else "general"
 

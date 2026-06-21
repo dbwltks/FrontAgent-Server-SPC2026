@@ -11,29 +11,35 @@ from app.providers.embedding_provider import create_embedding
 # threshold 필터링 후에도 match_count개를 채울 수 있도록 여유분을 더 가져온다.
 OVERFETCH_MULTIPLIER = 4
 
+SIMILARITY_THRESHOLD = 0.35
 
-def retrieve_knowledge(
+
+async def retrieve_knowledge(
     organization_id: str,
     query: str,
-    match_count: int = 5, # 반환할 chunk 개수
-    similarity_threshold: float = 0.1, # 유사도 임계값  
+    match_count: int = 5,
+    folder_id: str | None = None,
 ) -> list[dict]:
-    query_embedding = create_embedding(query)
+    query_embedding = await create_embedding(query)
+
+    rpc_params = {
+        "query_embedding": query_embedding,
+        "match_organization_id": organization_id,
+        "match_count": match_count * OVERFETCH_MULTIPLIER,
+        "match_folder_id": folder_id,
+    }
 
     result = supabase.rpc(
         "match_knowledge_chunks",
-        {
-            "query_embedding": query_embedding,
-            "match_organization_id": organization_id,
-            "match_count": match_count * OVERFETCH_MULTIPLIER,
-        },
+        rpc_params,
     ).execute()
 
     rows = result.data or []
 
     filtered_rows = [
-        row for row in rows
-        if row.get("similarity", 0) >= similarity_threshold
+        row
+        for row in rows
+        if row.get("similarity", 0) >= SIMILARITY_THRESHOLD
     ]
 
     return filtered_rows[:match_count]

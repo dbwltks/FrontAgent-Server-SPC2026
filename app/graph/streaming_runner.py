@@ -65,7 +65,7 @@ async def run_agent_streaming(
 
     # 4. decision_node에서 다음 처리 방향 판단
     await emit("intent", "active", "의도 분석 중")
-    state = decision_node(state)
+    state = await decision_node(state)
     await emit(
         "intent",
         "done",
@@ -77,7 +77,7 @@ async def run_agent_streaming(
     next_action = state.get("next_action")
     if next_action in ("search_knowledge", "run_task") or state.get("use_knowledge", False):
         await emit("knowledge", "active", "지식 검색 중")
-        state = knowledge_node(state)
+        state = await knowledge_node(state)
         groups = state.get("knowledge_context_groups", [])
         sources = [k.get("source_title", "") for k in state.get("used_knowledge", [])]
         await emit(

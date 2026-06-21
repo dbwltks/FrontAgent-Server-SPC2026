@@ -55,9 +55,23 @@ class AgentState(TypedDict):
 
     # 질문별 RAG 검색 결과
     knowledge_context_groups: List[Dict[str, Any]]
+    # 예:
+    # [
+    #   {
+    #     "query": "강아지 데려가도 돼",
+    #     "chunks": [...]
+    #   },
+    #   {
+    #     "query": "프리미엄 청소 얼마야",
+    #     "chunks": [...]
+    #   }
+    # ]
 
     # RAG 검색 결과 원본
     knowledge_context: List[Dict[str, Any]]
+
+    # 지식 폴더 제한 검색용
+    knowledge_folder_id: Optional[str]
 
     # 관리자 로그용으로 정리된 사용 지식 목록
     used_knowledge: List[Dict[str, Any]]

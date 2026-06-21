@@ -11,6 +11,8 @@ class ChatRequest(BaseModel):
     organization_id: str = Field(..., example="org_test")
     session_id: str = Field(..., example="chat_test")
     message: str = Field(..., example="안녕하세요")
+    folder_id: str | None = None
+    
 
 
 class ChatResponse(BaseModel):
@@ -35,9 +37,9 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+async def chat(req: ChatRequest):
     try:
-        result = agent_graph.invoke(
+        result = await agent_graph.ainvoke(
             {
                 "organization_id": req.organization_id,
                 "session_id": req.session_id,
