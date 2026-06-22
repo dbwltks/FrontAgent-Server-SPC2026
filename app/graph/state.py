@@ -52,9 +52,6 @@ class AgentState(TypedDict):
     # Rule Node에서 불러온 활성 규칙 목록
     rules: List[Dict[str, Any]]
 
-    # AI 프롬프트에 넣기 좋게 정리된 규칙 지시문 문자열
-    rule_instructions: str
-
     # 관리자 로그용으로 정리된 적용 규칙 이름 목록
     applied_rules: List[str]
 

@@ -80,7 +80,6 @@ def build_initial_state(
 
         # rules
         "rules": [],
-        "rule_instructions": "",
         "applied_rules": [],
 
         # knowledge

@@ -381,6 +381,16 @@ Rule Node는 현재 조직의 `is_active=true` 규칙을 모두 조회합니다.
 - 활성 응답 규칙
 - 진행 중인 Task 상태
 
+프롬프트는 다음 세 영역으로 분리합니다.
+
+| 영역 | 포함 내용 |
+|---|---|
+| 공통 Core Prompt | 언어, 간결성, 현재 요청 우선, 허위 사실 생성 금지 |
+| 조직별 응답 규칙 | DB의 활성 `name`, `instruction` |
+| 조건부 RAG 지시 | Knowledge 검색 요청에서만 검색 결과와 근거 제한 원칙 추가 |
+
+가격, 예약, 말투 같은 운영 정책은 Core Prompt에 중복 작성하지 않고 DB 규칙에서 관리합니다. 일반 인사나 잡담에는 Knowledge 검색 실패 안내를 넣지 않습니다.
+
 응답은 처음부터 스트리밍 모델로 생성합니다. 생성된 delta는 LangGraph Custom Stream으로 전달하고, 모든 delta를 합친 문자열은 `final_response`에 저장합니다.
 
 ```python
