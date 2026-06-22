@@ -35,12 +35,13 @@ def conversation_node(state: AgentState) -> dict:
     organization_id = state["organization_id"]
     session_id = state["session_id"]
     user_message = state["user_message"]
+    channel = state.get("channel", "web_chat")
 
     # 1. organization_id + session_id 기준으로 상담방 찾기 또는 생성
     conversation = get_or_create_conversation(
         organization_id=organization_id,
         session_id=session_id,
-        channel="web_chat",
+        channel=channel,
     )
 
     conversation_id = conversation["id"]
@@ -64,6 +65,7 @@ def conversation_node(state: AgentState) -> dict:
             message=user_message,
             metadata={
                 "session_id": session_id,
+                "channel": channel,
             },
         )
 
