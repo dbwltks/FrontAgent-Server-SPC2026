@@ -110,40 +110,29 @@ def build_knowledge_groups_text(knowledge_context_groups: list[dict] | None) -> 
     return "\n\n".join(lines)
 
 
-def build_session_context_text(session_state: dict | None) -> str:
+def build_session_context_text(
+    active_task: str | None,
+    task_step: str | None,
+) -> str:
     """
-    Redis에 저장된 session_state를 AI instruction용 텍스트로 변환한다.
+    checkpointer가 영속화한 구조화된 상태를 AI instruction용 텍스트로 변환한다.
 
-    직전 메시지/응답 자체는 conversation_history(메시지 배열)로 이미 전달되므로
-    여기서는 대화 히스토리로 표현되지 않는 구조화된 상태(intent, 진행 중인 task)만 다룬다.
+    직전 메시지/응답 자체는 messages(checkpointer가 자동 복원하는 히스토리)로
+    이미 전달되므로 여기서는 그것으로 표현되지 않는 상태(진행 중인 task)만 다룬다.
     """
 
-    if not session_state:
+    if not active_task:
         return "이전 대화 맥락이 없습니다."
 
-    lines = []
-
-    last_intent = session_state.get("last_intent")
-    active_task = session_state.get("active_task")
-    step = session_state.get("step")
-
-    if last_intent:
-        lines.append(f"이전 intent: {last_intent}")
-
-    if active_task:
-        lines.append(f"진행 중인 task: {active_task} (step: {step})")
-
-    if not lines:
-        return "이전 대화 맥락이 없습니다."
-
-    return "\n".join(lines)
+    return f"진행 중인 task: {active_task} (step: {task_step})"
 
 
 def build_response_instructions(
     intent: str | None,
     knowledge_context: list[dict],
     knowledge_context_groups: list[dict] | None = None,
-    session_state: dict | None = None,
+    active_task: str | None = None,
+    task_step: str | None = None,
     rules: list[dict] | None = None,
     rule_instructions: str | None = None,
     applied_rules: list[str] | None = None,
@@ -171,7 +160,7 @@ def build_response_instructions(
     else:
         knowledge_text = build_knowledge_text(knowledge_context)
 
-    session_context_text = build_session_context_text(session_state)
+    session_context_text = build_session_context_text(active_task, task_step)
 
     return f"""
 너는 Front Agent의 AI 상담사다.

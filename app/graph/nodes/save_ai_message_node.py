@@ -1,3 +1,6 @@
+import logging
+import threading
+
 from app.graph.state import AgentState
 from app.repositories.conversation_repo import (
     create_conversation_message,
@@ -5,9 +8,14 @@ from app.repositories.conversation_repo import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def save_ai_message_node(state: AgentState) -> AgentState:
     """
-    AI 최종 응답을 conversation_messages에 저장한다.
+    AI 최종 응답을 conversation_messages에 저장한다 (관리자 UI/로그용).
+    멀티턴 LLM 메모리는 response_node가 이미 state["messages"]에 추가했고,
+    checkpointer가 별도로 영속화하므로 이 노드와 무관하다.
 
     response_node 이후에 실행되어야 한다.
     """
@@ -35,19 +43,24 @@ def save_ai_message_node(state: AgentState) -> AgentState:
     )
 
     if saved_message is None:
-        # 메시지 저장에 실패하면 last_message만 갱신해
-        # 목록과 실제 메시지 내역이 어긋나는 상황을 만들지 않는다.
-        print(
-            f"Failed to save AI message: "
-            f"organization_id={organization_id}, conversation_id={conversation_id}"
+        logger.warning(
+            "Failed to save AI message: organization_id=%s, conversation_id=%s",
+            organization_id,
+            conversation_id,
         )
         return state
 
-    # 2. 상담방 목록의 마지막 메시지를 AI 응답으로 업데이트
-    update_conversation_last_message(
-        organization_id=organization_id,
-        conversation_id=conversation_id,
-        last_message=final_response,
-    )
+    # 2. 상담방 목록의 마지막 메시지 업데이트는 응답 경로와 무관한 부수 효과이므로
+    #    백그라운드로 던진다. 이 노드는 LangGraph가 별도 스레드(run_in_executor)에서
+    #    동기로 실행하므로 실행 중인 이벤트 루프가 없어 별도 스레드를 직접 띈다.
+    threading.Thread(
+        target=update_conversation_last_message,
+        kwargs={
+            "organization_id": organization_id,
+            "conversation_id": conversation_id,
+            "last_message": final_response,
+        },
+        daemon=True,
+    ).start()
 
     return state

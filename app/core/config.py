@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_role_key: str
 
+    # LangGraph checkpointer가 사용하는 직접 Postgres 연결 (Session pooler)
+    database_url: str
+
     class Config:
         env_file = ".env"
 
