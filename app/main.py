@@ -10,6 +10,7 @@ from app.api import (
     agent_runs,
     conversations,
     rules,
+    task_flows,
 )
 
 app = FastAPI(
@@ -39,3 +40,5 @@ app.include_router(agent_runs.router)
 # 상담방 / 메시지 관리 API
 app.include_router(conversations.router)
 
+# 태스크 플로우 테스트 API
+app.include_router(task_flows.router)
