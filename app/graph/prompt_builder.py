@@ -140,7 +140,7 @@ def build_response_instructions(
     """
     AI 답변 생성을 위한 instructions를 만든다.
 
-    일반 /chat 응답과 WebSocket streaming 응답에서 공통으로 사용한다.
+    /chat의 스트리밍/비스트리밍 응답에서 공통으로 사용한다.
 
     rules 우선순위:
     1. rule_instructions가 있으면 그대로 사용

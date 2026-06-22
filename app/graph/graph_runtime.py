@@ -56,7 +56,7 @@ def build_initial_state(
     knowledge_folder_id: str | None = None,
 ) -> dict:
     """
-    /chat, /ws/chat 등 채널별 엔드포인트가 공통으로 사용하는 초기 AgentState를 만든다.
+    /chat이 모든 채널(웹/전화/웹콜) 공통으로 사용하는 초기 AgentState를 만든다.
     messages는 checkpointer가 thread_id 기준으로 이전 턴 state를 복원해 채워주므로
     여기서는 넣지 않는다 (conversation_node가 이번 턴 사용자 메시지만 추가한다).
     """

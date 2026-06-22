@@ -121,9 +121,11 @@ async def decision_node(state: AgentState) -> AgentState:
     """
     conversation_history = history_from_state_messages(state.get("messages", []))
     user_message = state["user_message"]
+    organization_id = state["organization_id"]
 
     try:
         decision = await generate_structured(
+            organization_id=organization_id,
             instructions=DECISION_INSTRUCTIONS,
             user_message=user_message,
             schema=DecisionResult,

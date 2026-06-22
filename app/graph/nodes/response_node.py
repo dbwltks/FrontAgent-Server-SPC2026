@@ -18,14 +18,15 @@ FALLBACK_RESPONSE = "일시적인 오류로 답변 생성에 실패했습니다.
 
 async def response_node(state: AgentState) -> AgentState:
     """
-    최종 응답을 생성한다. /chat과 /ws/chat이 같은 노드를 공유한다.
+    최종 응답을 생성한다.
 
     OpenAI 호출 자체는 항상 스트리밍으로 하고, 받은 delta를
     get_stream_writer()로 흘려보낸다. graph.astream(stream_mode="custom")으로
-    호출되면(/ws/chat) 그 delta가 실시간으로 전달되고, graph.ainvoke로
-    호출되면(/chat) writer는 안전한 no-op이라 최종 텍스트만 모아서 반환한다.
+    호출되면 그 delta가 실시간으로 SSE에 전달되고, graph.ainvoke로
+    호출되면 writer는 안전한 no-op이라 최종 텍스트만 모아서 반환한다.
     """
     intent = state.get("intent")
+    organization_id = state["organization_id"]
 
     rules = state.get("rules", [])
     applied_rules = state.get("applied_rules", [])
@@ -61,6 +62,7 @@ async def response_node(state: AgentState) -> AgentState:
 
     try:
         async for delta in stream_text(
+            organization_id=organization_id,
             instructions=instructions,
             input_text=user_message,
             conversation_history=conversation_history or None,

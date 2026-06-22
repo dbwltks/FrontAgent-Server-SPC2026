@@ -12,11 +12,4 @@ create table public.rules (
   created_at timestamp without time zone default now(),
 
   updated_at timestamp without time zone default now()
-
-  -- description text,
-  -- rule_type text not null default 'general',
-  -- trigger_condition text,
-  
-  -- filters jsonb default '[]'::jsonb,
-  -- priority integer default 0,
 );

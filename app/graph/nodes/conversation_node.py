@@ -24,7 +24,7 @@ def conversation_node(state: AgentState) -> AgentState:
 
     추가 역할:
     - conversation.ai_enabled 값을 state에 저장한다.
-    - 이후 WebSocket runner가 AI 응답 생성 여부를 판단할 수 있다.
+    - 이후 ai_handoff_node가 AI 응답 생성 여부를 판단할 수 있다.
     """
 
     organization_id = state["organization_id"]
