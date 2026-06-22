@@ -33,7 +33,9 @@ async def response_node(state: AgentState) -> AgentState:
     user_message = state["user_message"]
 
     # checkpointer가 복원한 messages에서 직전까지의 히스토리를 재사용한다.
-    conversation_history = history_from_state_messages(state.get("messages", []))
+    conversation_history = history_from_state_messages(
+        state.get("messages", []), exclude_current_turn=True
+    )
 
     instructions = build_response_instructions(
         intent=intent,

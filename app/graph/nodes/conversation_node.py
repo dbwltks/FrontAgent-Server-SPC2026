@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from app.graph.state import AgentState
 from app.repositories.conversation_repo import (
@@ -11,7 +12,7 @@ from app.repositories.conversation_repo import (
 logger = logging.getLogger(__name__)
 
 
-def conversation_node(state: AgentState) -> AgentState:
+def conversation_node(state: AgentState) -> dict:
     """
     상담방을 찾거나 생성하고, 사용자 메시지를 두 곳에 기록한다.
 
@@ -24,6 +25,11 @@ def conversation_node(state: AgentState) -> AgentState:
     추가 역할:
     - conversation.ai_enabled 값을 state에 저장한다.
     - 이후 ai_handoff_node가 AI 응답 생성 여부를 판단할 수 있다.
+
+    decision_node와 병렬(같은 superstep)로 실행되므로, 자신이 바꾸지 않는
+    키(organization_id 등)는 절대 포함하지 않고 변경분만 dict로 반환해야 한다.
+    그렇지 않으면 두 노드가 같은 키에 동시에 값을 쓰는 것으로 인식되어
+    LangGraph가 InvalidUpdateError를 낸다.
     """
 
     organization_id = state["organization_id"]
@@ -39,37 +45,36 @@ def conversation_node(state: AgentState) -> AgentState:
 
     conversation_id = conversation["id"]
 
-    # 2. 이후 노드에서 사용할 conversation_id 저장
-    state["conversation_id"] = conversation_id
-
-    # 3. 상담방의 AI 자동응답 상태 저장
+    # 2. 상담방의 AI 자동응답 상태.
     #    기존 row에 ai_enabled가 없거나 None이면 기본값 True로 처리한다.
-    state["ai_enabled"] = conversation.get("ai_enabled", True)
-    if state["ai_enabled"] is None:
-        state["ai_enabled"] = True
+    ai_enabled = conversation.get("ai_enabled", True)
+    if ai_enabled is None:
+        ai_enabled = True
 
-    # 4. 고객 메시지 저장 (관리자 UI/로그용)
-    saved_message = create_conversation_message(
-        organization_id=organization_id,
-        conversation_id=conversation_id,
-        sender_type="customer",
-        sender_name="Customer",
-        message=user_message,
-        metadata={
-            "session_id": session_id,
-        },
-    )
-
-    if saved_message is None:
-        logger.warning(
-            "Failed to save customer message: organization_id=%s, conversation_id=%s",
-            organization_id,
-            conversation_id,
+    # 3. 고객 메시지 저장(관리자 UI/로그용)은 응답 경로에 필요하지 않으므로
+    #    백그라운드로 던진다. 이 노드는 LangGraph executor의 별도 스레드에서
+    #    실행되어 실행 중인 이벤트 루프가 없으므로 asyncio.create_task는 쓸 수
+    #    없고, daemon Thread로 백그라운드 실행한다.
+    def _save_customer_message():
+        saved_message = create_conversation_message(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            sender_type="customer",
+            sender_name="Customer",
+            message=user_message,
+            metadata={
+                "session_id": session_id,
+            },
         )
-    else:
-        # 5. 이 노드는 LangGraph의 executor에서 실행되므로 동기 DB 갱신을 여기서
-        #    완료한다. 요청마다 별도 Thread를 만들지 않아 동시 요청 시 Thread가
-        #    무제한으로 증가하는 것을 방지한다.
+
+        if saved_message is None:
+            logger.warning(
+                "Failed to save customer message: organization_id=%s, conversation_id=%s",
+                organization_id,
+                conversation_id,
+            )
+            return
+
         try:
             update_conversation_last_message(
                 organization_id=organization_id,
@@ -79,7 +84,12 @@ def conversation_node(state: AgentState) -> AgentState:
         except Exception:
             logger.warning("Failed to update customer last_message", exc_info=True)
 
-    # 6. LLM 멀티턴 메모리(checkpointer)에 사용자 메시지 추가
-    state["messages"] = [{"role": "user", "content": user_message}]
+    threading.Thread(target=_save_customer_message, daemon=True).start()
 
-    return state
+    # 4. 이후 노드에서 사용할 conversation_id/ai_enabled 저장,
+    #    LLM 멀티턴 메모리(checkpointer)에 사용자 메시지 추가
+    return {
+        "conversation_id": conversation_id,
+        "ai_enabled": ai_enabled,
+        "messages": [{"role": "user", "content": user_message}],
+    }

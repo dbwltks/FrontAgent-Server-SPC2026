@@ -61,6 +61,7 @@ flowchart LR
 
     subgraph Storage[데이터 계층]
         Supabase[Supabase 테이블]
+        ObjectStorage[Supabase Storage<br/>지식 원본 파일]
         Vector[pgvector RPC]
         Checkpoint[Postgres Checkpoint]
         Redis[Redis 임베딩 캐시]
@@ -76,6 +77,7 @@ flowchart LR
     Knowledge --> Vector
     LangGraph <--> Checkpoint
     APIs --> Supabase
+    APIs --> ObjectStorage
     Conversation --> Supabase
     Persistence --> Supabase
 ```
@@ -91,7 +93,7 @@ app/
 │   ├── chat.py                 채팅, SSE 스트리밍
 │   ├── conversations.py        상담방과 관리자 메시지
 │   ├── rules.py                응답 규칙 CRUD
-│   ├── knowledge.py            지식 원본·chunk CRUD 및 업로드
+    │   ├── knowledge.py            지식 원본·chunk CRUD 및 업로드
 │   ├── knowledge_folders.py    지식 폴더 CRUD
 │   ├── agent_runs.py           Agent 실행 로그 조회
 │   └── health.py               상태 확인
@@ -106,7 +108,7 @@ app/
 │   ├── langchain_provider.py   조직별 ChatOpenAI와 LCEL 체인
 │   └── embedding_provider.py   OpenAI 임베딩과 Redis 캐시
 ├── rag/                        문서 추출, 분할, 인덱싱, 검색
-└── repositories/               Supabase 테이블 접근 계층
+└── repositories/               Supabase 테이블·Storage 접근 계층
 ```
 
 ## 5. 애플리케이션 시작 과정
@@ -358,6 +360,16 @@ await async_client.embeddings.create(
 supabase.rpc("match_knowledge_chunks", rpc_params).execute()
 ```
 
+### 지식 원본 파일 저장
+
+업로드된 파일은 임시 파일로 검증한 뒤 비공개 Supabase Storage의 `knowledge-originals` 버킷에 저장합니다.
+
+```text
+{organization_id}/{source_id}/{uuid}.{extension}
+```
+
+`knowledge_sources`에는 `storage_bucket`, `storage_path`, `file_size`, `checksum_sha256`를 저장합니다. 인덱싱에 실패해도 원본 파일과 `failed` 상태를 유지하므로 향후 재처리에 사용할 수 있습니다. 원본 다운로드 URL은 저장하지 않고 요청 시 5분 동안 유효한 Signed URL을 생성합니다.
+
 ### 8.4 Rule Node
 
 `app/graph/nodes/rule_node.py`
@@ -573,7 +585,8 @@ result = await agent_graph.ainvoke(initial_state, config=config)
 | 상담방 | `conversations` | Supabase Repository |
 | 고객·AI·관리자 메시지 | `conversation_messages` | Supabase Repository |
 | 응답 규칙 | `rules` | Supabase Repository |
-| 지식 원본 | `knowledge_sources` | Supabase Repository |
+| 지식 원본 메타데이터 | `knowledge_sources` | Supabase Repository |
+| 지식 원본 파일 | 비공개 `knowledge-originals` 버킷 | Supabase Storage |
 | 지식 chunk와 embedding | `knowledge_chunks` | Supabase + pgvector |
 | Agent 실행 기록 | `agent_runs` | Supabase Repository |
 | LangGraph State | Checkpoint 테이블 | `AsyncPostgresSaver` |
@@ -591,6 +604,7 @@ result = await agent_graph.ainvoke(initial_state, config=config)
 | 규칙 상세·수정·삭제 | GET, PATCH, DELETE | `/rules/{rule_id}` |
 | 지식 목록·생성 | GET, POST | `/knowledge` |
 | 지식 파일 업로드 | POST | `/knowledge/upload` |
+| 지식 원본 다운로드 URL | GET | `/knowledge/{source_id}/download-url` |
 | 지식 상세·수정·삭제 | GET, PATCH, DELETE | `/knowledge/{source_id}` |
 | 지식 chunk 조회 | GET | `/knowledge/{source_id}/chunks` |
 | 지식 폴더 CRUD | - | `/knowledge/folders` |
@@ -603,7 +617,7 @@ result = await agent_graph.ainvoke(initial_state, config=config)
 | Agent 실행 로그 | GET | `/agent-runs` |
 | Agent 실행 상세 | GET | `/agent-runs/{run_id}` |
 
-지식 파일은 1MB 단위로 임시 파일에 기록하며 기본 최대 크기는 20MB입니다. 최대 크기는 `KNOWLEDGE_UPLOAD_MAX_BYTES` 환경변수로 조정할 수 있습니다.
+지식 파일은 1MB 단위로 임시 파일에 기록하며 기본 최대 크기는 20MB입니다. `KNOWLEDGE_UPLOAD_MAX_BYTES`를 낮춰 애플리케이션 제한을 강화할 수 있습니다. 20MB보다 높이려면 Storage 버킷의 `file_size_limit`도 함께 변경해야 합니다.
 
 ## 13. 오류 처리 원칙
 
