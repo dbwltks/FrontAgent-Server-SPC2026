@@ -3,7 +3,8 @@ import json
 import logging
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 
@@ -12,6 +13,104 @@ router = APIRouter(prefix="/voice", tags=["Voice"])
 logger = logging.getLogger(__name__)
 OPENAI_REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 REALTIME_ERROR_MESSAGE = "Realtime voice connection failed"
+OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
+
+
+class SpeechRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+
+
+def get_voice_mode() -> str:
+    mode = settings.voice_mode.strip().lower()
+    return mode if mode in {"pipeline", "realtime"} else "pipeline"
+
+
+@router.get("/config")
+async def voice_config():
+    return {
+        "mode": get_voice_mode(),
+        "stt_model": settings.voice_stt_model,
+        "tts_model": settings.voice_tts_model,
+    }
+
+
+@router.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    content = await audio.read(settings.voice_upload_max_bytes + 1)
+    if not content:
+        raise HTTPException(status_code=400, detail="Audio file is required")
+    if len(content) > settings.voice_upload_max_bytes:
+        raise HTTPException(status_code=413, detail="Audio file is too large")
+
+    files = {
+        "file": (
+            audio.filename or "utterance.webm",
+            content,
+            audio.content_type or "audio/webm",
+        )
+    }
+    data = {
+        "model": settings.voice_stt_model,
+        "language": "ko",
+        "response_format": "json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            openai_response = await client.post(
+                OPENAI_TRANSCRIPTIONS_URL,
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                data=data,
+                files=files,
+            )
+    except httpx.HTTPError:
+        logger.exception("OpenAI transcription request failed")
+        raise HTTPException(status_code=502, detail="Voice transcription failed")
+
+    if not openai_response.is_success:
+        logger.error(
+            "OpenAI transcription rejected request: status=%s body=%s",
+            openai_response.status_code,
+            openai_response.text[:500],
+        )
+        raise HTTPException(status_code=502, detail="Voice transcription failed")
+
+    text = str(openai_response.json().get("text", "")).strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="No speech was detected")
+    return {"text": text}
+
+
+@router.post("/speech")
+async def synthesize_speech(payload: SpeechRequest):
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            openai_response = await client.post(
+                OPENAI_SPEECH_URL,
+                headers={
+                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": settings.voice_tts_model,
+                    "voice": settings.voice_tts_voice,
+                    "input": payload.text,
+                    "response_format": "mp3",
+                },
+            )
+    except httpx.HTTPError:
+        logger.exception("OpenAI speech request failed")
+        raise HTTPException(status_code=502, detail="Speech generation failed")
+
+    if not openai_response.is_success:
+        logger.error(
+            "OpenAI speech rejected request: status=%s body=%s",
+            openai_response.status_code,
+            openai_response.text[:500],
+        )
+        raise HTTPException(status_code=502, detail="Speech generation failed")
+
+    return Response(content=openai_response.content, media_type="audio/mpeg")
 
 
 def build_realtime_session_config() -> dict:
@@ -65,6 +164,8 @@ async def create_realtime_call(
     organization_id: str = Query(...),
     session_id: str = Query(...),
 ):
+    if get_voice_mode() != "realtime":
+        raise HTTPException(status_code=409, detail="Realtime voice mode is disabled")
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/sdp":
         raise HTTPException(status_code=415, detail="Content-Type must be application/sdp")
 

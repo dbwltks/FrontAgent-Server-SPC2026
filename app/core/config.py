@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4.1-mini"
     openai_realtime_model: str = "gpt-realtime-mini"
     openai_realtime_voice: str = "marin"
+    voice_mode: str = "pipeline"
+    voice_stt_model: str = "gpt-4o-mini-transcribe"
+    voice_tts_model: str = "gpt-4o-mini-tts"
+    voice_tts_voice: str = "marin"
+    voice_upload_max_bytes: int = 10 * 1024 * 1024
 
     redis_url: str = "redis://localhost:6379"
 

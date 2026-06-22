@@ -4,7 +4,7 @@ from app.tasks.edge_evaluator import select_failure_edge, select_next_edge
 from app.tasks.executors import EXECUTOR_MAP
 from app.tasks.memory import TaskMemory
 from app.tasks.repository import TaskRepository
-from app.tasks.types import ExecutorResult, TaskRunResponse
+from app.tasks.types import ExecutorResult, TaskRunResponse, normalize_task_error
 
 
 class DynamicTaskRunner:
@@ -192,27 +192,24 @@ class DynamicTaskRunner:
                 )
 
             if executor_result.next_behavior == "fail":
-                edges = self.repository.list_edges_from(
-                    flow_id=flow_id,
-                    source_node_key=current_node_key,
+                normalized_error = normalize_task_error(
+                    executor_result.error,
+                    code="NODE_EXECUTION_FAILED",
+                    message="Node execution failed.",
+                    node_key=current_node_key,
+                    node_type=node.get("node_type"),
                 )
 
-                failure_edge = select_failure_edge(edges)
+                failure_node_key = self._move_to_failure_edge_if_exists(
+                    task_session_id=task_session_id,
+                    flow_id=flow_id,
+                    current_node_key=current_node_key,
+                    variables=variables,
+                    error=normalized_error,
+                )
 
-                if failure_edge:
-                    current_node_key = failure_edge["target_node_key"]
-
-                    self.repository.update_session(
-                        task_session_id,
-                        {
-                            "current_node_key": current_node_key,
-                            "waiting_node_key": None,
-                            "variables": variables,
-                            "status": "running",
-                            "last_error": executor_result.error,
-                        },
-                    )
-
+                if failure_node_key:
+                    current_node_key = failure_node_key
                     user_input_for_current_node = None
                     continue
 
@@ -221,11 +218,7 @@ class DynamicTaskRunner:
                     flow_id=flow_id,
                     current_node_key=current_node_key,
                     variables=variables,
-                    error=executor_result.error
-                    or {
-                        "code": "NODE_EXECUTION_FAILED",
-                        "message": "Node execution failed.",
-                    },
+                    error=normalized_error,
                     message=executor_result.message,
                 )
 
@@ -240,15 +233,21 @@ class DynamicTaskRunner:
             )
 
             if not next_edge:
+                normalized_error = normalize_task_error(
+                    {
+                        "code": "NEXT_EDGE_NOT_FOUND",
+                        "message": f"No valid edge from node: {current_node_key}",
+                    },
+                    node_key=current_node_key,
+                    node_type=node.get("node_type"),
+                )
+
                 return self._mark_failed(
                     task_session_id=task_session_id,
                     flow_id=flow_id,
                     current_node_key=current_node_key,
                     variables=variables,
-                    error={
-                        "code": "NEXT_EDGE_NOT_FOUND",
-                        "message": f"No valid edge from node: {current_node_key}",
-                    },
+                    error=normalized_error,
                     message=executor_result.message,
                 )
 
@@ -310,6 +309,7 @@ class DynamicTaskRunner:
                 error={
                     "code": "UNSUPPORTED_NODE_TYPE",
                     "message": f"Unsupported node type: {node_type}",
+                    "node_type": node_type,
                 },
             )
 
@@ -319,6 +319,40 @@ class DynamicTaskRunner:
             user_message=user_message,
             is_waiting_input=is_waiting_input,
         )
+    
+    def _move_to_failure_edge_if_exists(
+        self,
+        task_session_id: str,
+        flow_id: str,
+        current_node_key: str,
+        variables: dict[str, Any],
+        error: dict[str, Any],
+    ) -> str | None:
+        edges = self.repository.list_edges_from(
+            flow_id=flow_id,
+            source_node_key=current_node_key,
+        )
+
+        failure_edge = select_failure_edge(edges)
+
+        if not failure_edge:
+            return None
+
+        next_node_key = failure_edge["target_node_key"]
+
+        self.repository.update_session(
+            task_session_id,
+            {
+                "current_node_key": next_node_key,
+                "waiting_node_key": None,
+                "variables": variables,
+                "status": "running",
+                "last_error": error,
+            },
+        )
+
+        return next_node_key
+    
 
     def _mark_failed(
         self,
@@ -329,6 +363,13 @@ class DynamicTaskRunner:
         error: dict[str, Any],
         message: str | None = None,
     ) -> TaskRunResponse:
+        normalized_error = normalize_task_error(
+            error,
+            code="TASK_FAILED",
+            message="Task failed.",
+            node_key=current_node_key,
+        )
+
         self.repository.update_session(
             task_session_id,
             {
@@ -336,7 +377,7 @@ class DynamicTaskRunner:
                 "waiting_node_key": None,
                 "variables": variables,
                 "status": "failed",
-                "last_error": error,
+                "last_error": normalized_error,
             },
         )
 
@@ -348,5 +389,5 @@ class DynamicTaskRunner:
             task_session_id=task_session_id,
             current_node_key=current_node_key,
             variables=variables,
-            error=error,
+            error=normalized_error,
         )

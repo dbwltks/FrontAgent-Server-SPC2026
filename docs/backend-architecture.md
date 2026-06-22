@@ -579,7 +579,14 @@ result = await agent_graph.ainvoke(initial_state, config=config)
 
 ### 웹 음성 통화
 
-웹 통화는 브라우저와 OpenAI Realtime API 사이의 WebRTC 연결을 사용합니다. 표준 OpenAI API 키는 브라우저에 노출하지 않고 백엔드의 `POST /voice/realtime`이 SDP offer를 전달해 세션을 생성합니다.
+웹 통화 방식은 `VOICE_MODE` 환경변수로 선택합니다. 기본값인 `pipeline`은 발화 단위로 STT → 기존 `/chat` LangGraph → TTS를 실행합니다. `realtime`은 브라우저와 OpenAI Realtime API 사이의 WebRTC 연결을 사용합니다.
+
+| `VOICE_MODE` | 처리 방식 | 특징 |
+|---|---|---|
+| `pipeline` | `gpt-4o-mini-transcribe` → LangGraph → `gpt-4o-mini-tts` | 비용 예측이 쉽고 Realtime 권한이 필요 없음 |
+| `realtime` | WebRTC → Realtime 함수 호출 → LangGraph | 지연이 짧고 자연스러운 양방향 통화 |
+
+표준 OpenAI API 키는 두 방식 모두 브라우저에 노출하지 않습니다. 프론트는 `GET /voice/config`에서 활성 모드를 조회하고 알맞은 통화 경로를 선택합니다.
 
 ```mermaid
 sequenceDiagram
@@ -627,6 +634,9 @@ Realtime 모델은 직접 업무 답변을 만들지 않고 매 발화마다 `qu
 |---|---|---|
 | 상태 확인 | GET | `/health` |
 | 채팅 | POST | `/chat` |
+| 웹 통화 모드 조회 | GET | `/voice/config` |
+| 음성 인식 | POST | `/voice/transcribe` |
+| 음성 생성 | POST | `/voice/speech` |
 | 웹 통화 WebRTC 세션 생성 | POST | `/voice/realtime` |
 | 규칙 목록·생성 | GET, POST | `/rules` |
 | 규칙 상세·수정·삭제 | GET, PATCH, DELETE | `/rules/{rule_id}` |
