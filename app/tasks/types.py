@@ -30,3 +30,31 @@ class TaskRunResponse:
     current_node_key: str | None = None
     variables: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] | None = None
+
+
+def normalize_task_error(
+    error: dict[str, Any] | None,
+    *,
+    code: str = "TASK_EXECUTION_FAILED",
+    message: str = "Task execution failed.",
+    node_key: str | None = None,
+    node_type: str | None = None,
+) -> dict[str, Any]:
+    normalized_error = error.copy() if error else {
+        "code": code,
+        "message": message,
+    }
+
+    if "code" not in normalized_error:
+        normalized_error["code"] = code
+
+    if "message" not in normalized_error:
+        normalized_error["message"] = message
+
+    if node_key:
+        normalized_error["node_key"] = node_key
+
+    if node_type:
+        normalized_error["node_type"] = node_type
+
+    return normalized_error
