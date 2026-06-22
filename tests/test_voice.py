@@ -1,6 +1,8 @@
 import unittest
 
-from app.api.voice import build_realtime_session_config
+from unittest.mock import patch
+
+from app.api.voice import build_realtime_session_config, get_voice_mode
 
 
 class VoiceRealtimeTests(unittest.TestCase):
@@ -17,6 +19,10 @@ class VoiceRealtimeTests(unittest.TestCase):
         self.assertTrue(
             session["audio"]["input"]["turn_detection"]["interrupt_response"]
         )
+
+    def test_invalid_voice_mode_falls_back_to_pipeline(self):
+        with patch("app.api.voice.settings.voice_mode", "unknown"):
+            self.assertEqual(get_voice_mode(), "pipeline")
 
 
 if __name__ == "__main__":
