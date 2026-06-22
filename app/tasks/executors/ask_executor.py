@@ -1,7 +1,7 @@
 from typing import Any
 
-from app.tasks.executors.message_executor import render_memory_template
 from app.tasks.memory import TaskMemory
+from app.tasks.template_renderer import render_text_template
 from app.tasks.types import ExecutorResult
 
 
@@ -39,6 +39,6 @@ def execute_ask_node(
 
     return ExecutorResult(
         status="success",
-        message=render_memory_template(question, memory),
+        message=render_text_template(question, memory),
         next_behavior="wait_user",
     )

@@ -1,20 +1,8 @@
-import re
 from typing import Any
 
 from app.tasks.memory import TaskMemory
+from app.tasks.template_renderer import render_text_template
 from app.tasks.types import ExecutorResult
-
-
-TEMPLATE_PATTERN = re.compile(r"{{\s*memory\.([a-zA-Z0-9_]+)\s*}}")
-
-
-def render_memory_template(text: str, memory: TaskMemory) -> str:
-    def replace(match: re.Match) -> str:
-        key = match.group(1)
-        value = memory.get(key, "")
-        return str(value) if value is not None else ""
-
-    return TEMPLATE_PATTERN.sub(replace, text)
 
 
 def execute_message_node(
@@ -28,6 +16,6 @@ def execute_message_node(
 
     return ExecutorResult(
         status="success",
-        message=render_memory_template(message, memory),
+        message=render_text_template(message, memory),
         next_behavior="evaluate_edges",
     )

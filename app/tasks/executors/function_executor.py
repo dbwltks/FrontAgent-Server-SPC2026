@@ -1,60 +1,9 @@
-import re
 from typing import Any
 
-from app.tasks.edge_evaluator import get_value_by_path
 from app.tasks.function_registry import get_task_function
 from app.tasks.memory import TaskMemory
+from app.tasks.template_renderer import resolve_template_value
 from app.tasks.types import ExecutorResult
-
-
-FULL_MEMORY_TEMPLATE_PATTERN = re.compile(r"^{{\s*memory\.([a-zA-Z0-9_.]+)\s*}}$")
-PARTIAL_MEMORY_TEMPLATE_PATTERN = re.compile(r"{{\s*memory\.([a-zA-Z0-9_.]+)\s*}}")
-
-
-def _resolve_memory_template_value(
-    value: Any,
-    memory: TaskMemory,
-) -> Any:
-    """
-    Function Node params 안의 {{memory.xxx}} 값을 실제 memory 값으로 바꾼다.
-
-    예:
-    "{{memory.normalized_date}}" -> "2026-06-22"
-    "예약일: {{memory.normalized_date}}" -> "예약일: 2026-06-22"
-    """
-
-    if isinstance(value, dict):
-        return {
-            key: _resolve_memory_template_value(child_value, memory)
-            for key, child_value in value.items()
-        }
-
-    if isinstance(value, list):
-        return [
-            _resolve_memory_template_value(item, memory)
-            for item in value
-        ]
-
-    if not isinstance(value, str):
-        return value
-
-    stripped_value = value.strip()
-    full_match = FULL_MEMORY_TEMPLATE_PATTERN.match(stripped_value)
-
-    if full_match:
-        memory_path = f"memory.{full_match.group(1)}"
-        return get_value_by_path(memory.to_dict(), memory_path)
-
-    def replace_partial(match: re.Match) -> str:
-        memory_path = f"memory.{match.group(1)}"
-        resolved_value = get_value_by_path(memory.to_dict(), memory_path)
-
-        if resolved_value is None:
-            return ""
-
-        return str(resolved_value)
-
-    return PARTIAL_MEMORY_TEMPLATE_PATTERN.sub(replace_partial, value)
 
 
 def execute_function_node(
@@ -97,7 +46,7 @@ def execute_function_node(
         )
 
     try:
-        resolved_params = _resolve_memory_template_value(
+        resolved_params = resolve_template_value(
             value=raw_params,
             memory=memory,
         )
