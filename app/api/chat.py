@@ -80,12 +80,11 @@ def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
         items = [
             {
                 "name": r.get("name", "unnamed"),
-                "action_type": r.get("action_type", ""),
-                "trigger_condition": r.get("trigger_condition", ""),
+                "instruction": r.get("instruction", ""),
             }
             for r in rules
         ]
-        return f"{len(rules)}개 규칙 적용", items
+        return f"활성 규칙 {len(rules)}개를 응답 지시문에 반영", items
 
     return "", []
 

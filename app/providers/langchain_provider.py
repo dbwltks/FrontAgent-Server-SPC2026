@@ -1,21 +1,46 @@
+from functools import lru_cache
+
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
+from app.repositories.organization_repo import get_organization
 
 
-chat_model = ChatOpenAI(
-    model=settings.openai_model,
-    api_key=settings.openai_api_key,
-)
+@lru_cache(maxsize=128)
+def _chat_model_for(provider: str, model: str, streaming: bool) -> ChatOpenAI:
+    if provider != "openai":
+        raise ValueError(f"지원하지 않는 llm_provider입니다: {provider}")
 
-streaming_chat_model = ChatOpenAI(
-    model=settings.openai_model,
-    api_key=settings.openai_api_key,
-    streaming=True,
-)
+    return ChatOpenAI(
+        model=model,
+        api_key=settings.openai_api_key,
+        streaming=streaming,
+    )
+
+
+def _resolve_model_config(organization_id: str) -> tuple[str, str]:
+    organization = get_organization(organization_id)
+
+    if not organization:
+        return "openai", settings.openai_model
+
+    return (
+        organization.get("llm_provider") or "openai",
+        organization.get("llm_model") or settings.openai_model,
+    )
+
+
+def get_chat_model(organization_id: str) -> ChatOpenAI:
+    provider, model = _resolve_model_config(organization_id)
+    return _chat_model_for(provider, model, streaming=False)
+
+
+def get_streaming_chat_model(organization_id: str) -> ChatOpenAI:
+    provider, model = _resolve_model_config(organization_id)
+    return _chat_model_for(provider, model, streaming=True)
 
 
 def _history_to_messages(conversation_history: list[dict] | None) -> list:
@@ -42,13 +67,18 @@ _PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
-def build_chain(parser: RunnableLambda | None = None, streaming: bool = False):
+def build_chain(
+    organization_id: str,
+    parser: RunnableLambda | None = None,
+    streaming: bool = False,
+):
     """
     instructions/history/user_message를 받아 LLM을 호출하는 LCEL 체인을 만든다.
+    organization_id로 그 조직에 설정된 provider/model을 가져와 쓴다.
     parser를 넘기면 모델 응답(AIMessage)을 RunnableLambda로 가공한 결과를 반환하고,
     넘기지 않으면 AIMessage를 그대로 반환한다.
     """
-    model = streaming_chat_model if streaming else chat_model
+    model = get_streaming_chat_model(organization_id) if streaming else get_chat_model(organization_id)
     chain = _PROMPT | model
 
     if parser is not None:
@@ -58,6 +88,7 @@ def build_chain(parser: RunnableLambda | None = None, streaming: bool = False):
 
 
 async def generate_text(
+    organization_id: str,
     instructions: str,
     user_message: str,
     conversation_history: list[dict] | None = None,
@@ -67,7 +98,7 @@ async def generate_text(
     decision_node처럼 한 번에 결과를 받는 비스트리밍 호출.
     parser가 있으면 그 결과(예: dict)를, 없으면 텍스트(str)를 반환한다.
     """
-    chain = build_chain(parser=parser, streaming=False)
+    chain = build_chain(organization_id, parser=parser, streaming=False)
 
     result = await chain.ainvoke(
         {
@@ -84,6 +115,7 @@ async def generate_text(
 
 
 async def stream_text(
+    organization_id: str,
     instructions: str,
     input_text: str,
     conversation_history: list[dict] | None = None,
@@ -91,7 +123,7 @@ async def stream_text(
     """
     response_node가 쓰는 토큰 단위 스트리밍 호출.
     """
-    chain = build_chain(streaming=True)
+    chain = build_chain(organization_id, streaming=True)
 
     async for chunk in chain.astream(
         {
@@ -105,6 +137,7 @@ async def stream_text(
 
 
 async def generate_structured(
+    organization_id: str,
     instructions: str,
     user_message: str,
     schema: type,
@@ -120,7 +153,7 @@ async def generate_structured(
     postprocess를 넘기면 그 RunnableLambda로 schema 인스턴스를 추가 가공한다
     (예: 정규식 fallback으로 knowledge_queries를 보강).
     """
-    structured_model = chat_model.with_structured_output(schema)
+    structured_model = get_chat_model(organization_id).with_structured_output(schema)
     chain = _PROMPT | structured_model
 
     if postprocess is not None:
