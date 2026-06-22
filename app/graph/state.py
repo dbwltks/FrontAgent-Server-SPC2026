@@ -1,4 +1,6 @@
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from langgraph.graph.message import add_messages
 
 
 class AgentState(TypedDict):
@@ -13,12 +15,14 @@ class AgentState(TypedDict):
     # 현재 상담방의 AI 자동응답 여부
     ai_enabled: bool
 
-    # Redis에서 불러온 세션 상태
-    session_state: Dict[str, Any]
+    # 멀티턴 대화 히스토리. checkpointer가 thread_id(=organization_id:session_id) 기준으로
+    # 자동 저장/복원한다. add_messages reducer가 매 턴 새 메시지를 누적시켜준다.
+    messages: Annotated[list, add_messages]
 
-    # Supabase에서 불러온 최근 대화 히스토리 (OpenAI role/content 형식)
-    # conversation_node 다음 단계에서 한 번만 조회해 decision_node/response_node가 공유한다.
-    conversation_history: List[Dict[str, str]]
+    # 대화 히스토리로 표현되지 않는 구조화된 상태 (예약 진행 단계 등).
+    # checkpointer가 함께 영속화한다.
+    active_task: Optional[str]
+    task_step: Optional[str]
 
     # Decision Node에서 분류한 intent
     # 예: pricing, reservation, handoff, faq, general
@@ -82,4 +86,3 @@ class AgentState(TypedDict):
 
     # 최종 AI 응답
     final_response: Optional[str]
-    
