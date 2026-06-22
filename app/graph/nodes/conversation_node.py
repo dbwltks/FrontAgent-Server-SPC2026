@@ -1,5 +1,4 @@
 import logging
-import threading
 
 from app.graph.state import AgentState
 from app.repositories.conversation_repo import (
@@ -68,19 +67,17 @@ def conversation_node(state: AgentState) -> AgentState:
             conversation_id,
         )
     else:
-        # 5. 상담방 목록의 마지막 메시지 업데이트는 응답 생성과 무관한 부수 효과이므로
-        #    백그라운드로 던져서 첫 토큰까지의 지연에 영향을 주지 않게 한다.
-        #    이 노드는 LangGraph가 별도 스레드(run_in_executor)에서 동기로 실행하므로
-        #    실행 중인 이벤트 루프가 없다. asyncio.create_task 대신 별도 스레드를 직접 띈다.
-        threading.Thread(
-            target=update_conversation_last_message,
-            kwargs={
-                "organization_id": organization_id,
-                "conversation_id": conversation_id,
-                "last_message": user_message,
-            },
-            daemon=True,
-        ).start()
+        # 5. 이 노드는 LangGraph의 executor에서 실행되므로 동기 DB 갱신을 여기서
+        #    완료한다. 요청마다 별도 Thread를 만들지 않아 동시 요청 시 Thread가
+        #    무제한으로 증가하는 것을 방지한다.
+        try:
+            update_conversation_last_message(
+                organization_id=organization_id,
+                conversation_id=conversation_id,
+                last_message=user_message,
+            )
+        except Exception:
+            logger.warning("Failed to update customer last_message", exc_info=True)
 
     # 6. LLM 멀티턴 메모리(checkpointer)에 사용자 메시지 추가
     state["messages"] = [{"role": "user", "content": user_message}]

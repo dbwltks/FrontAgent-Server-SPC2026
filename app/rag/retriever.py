@@ -1,3 +1,5 @@
+import asyncio
+
 # 질문 embedding 생성
 # → Supabase RPC 검색
 # → 관련 chunk 5개 반환
@@ -29,10 +31,12 @@ async def retrieve_knowledge(
         "match_folder_id": folder_id,
     }
 
-    result = supabase.rpc(
-        "match_knowledge_chunks",
-        rpc_params,
-    ).execute()
+    result = await asyncio.to_thread(
+        lambda: supabase.rpc(
+            "match_knowledge_chunks",
+            rpc_params,
+        ).execute()
+    )
 
     rows = result.data or []
 

@@ -1,5 +1,4 @@
 import logging
-import threading
 
 from app.graph.state import AgentState
 from app.repositories.conversation_repo import (
@@ -50,17 +49,16 @@ def save_ai_message_node(state: AgentState) -> AgentState:
         )
         return state
 
-    # 2. 상담방 목록의 마지막 메시지 업데이트는 응답 경로와 무관한 부수 효과이므로
-    #    백그라운드로 던진다. 이 노드는 LangGraph가 별도 스레드(run_in_executor)에서
-    #    동기로 실행하므로 실행 중인 이벤트 루프가 없어 별도 스레드를 직접 띈다.
-    threading.Thread(
-        target=update_conversation_last_message,
-        kwargs={
-            "organization_id": organization_id,
-            "conversation_id": conversation_id,
-            "last_message": final_response,
-        },
-        daemon=True,
-    ).start()
+    # 2. LangGraph executor 안에서 갱신을 완료해 요청마다 별도 Thread가
+    #    무제한 생성되지 않도록 한다. 목록 갱신 실패는 메시지 저장 결과에
+    #    영향을 주지 않는 best-effort 작업으로 처리한다.
+    try:
+        update_conversation_last_message(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            last_message=final_response,
+        )
+    except Exception:
+        logger.warning("Failed to update AI last_message", exc_info=True)
 
     return state

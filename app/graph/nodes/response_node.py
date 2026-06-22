@@ -4,10 +4,7 @@ from langgraph.config import get_stream_writer
 
 from app.graph.state import AgentState
 from app.graph.message_utils import history_from_state_messages
-from app.graph.prompt_builder import (
-    build_response_instructions,
-    build_rule_instructions_text,
-)
+from app.graph.prompt_builder import build_response_instructions
 from app.providers.langchain_provider import stream_text
 
 
@@ -29,7 +26,6 @@ async def response_node(state: AgentState) -> AgentState:
     organization_id = state["organization_id"]
 
     rules = state.get("rules", [])
-    applied_rules = state.get("applied_rules", [])
 
     knowledge_context = state.get("knowledge_context", [])
     knowledge_context_groups = state.get("knowledge_context_groups", [])
@@ -39,22 +35,14 @@ async def response_node(state: AgentState) -> AgentState:
     # checkpointer가 복원한 messages에서 직전까지의 히스토리를 재사용한다.
     conversation_history = history_from_state_messages(state.get("messages", []))
 
-    # rules 목록을 AI 프롬프트에 넣기 좋은 문자열로 변환
-    rule_instructions = state.get("rule_instructions")
-
-    if not rule_instructions:
-        rule_instructions = build_rule_instructions_text(rules)
-        state["rule_instructions"] = rule_instructions
-
     instructions = build_response_instructions(
         intent=intent,
         knowledge_context=knowledge_context,
         knowledge_context_groups=knowledge_context_groups,
+        use_knowledge=state.get("use_knowledge", False),
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
         rules=rules,
-        rule_instructions=rule_instructions,
-        applied_rules=applied_rules,
     )
 
     writer = get_stream_writer()

@@ -15,7 +15,6 @@ def ai_handoff_node(state: AgentState) -> AgentState:
     state["should_use_knowledge"] = False
     state["final_response"] = None
     state["rules"] = []
-    state["rule_instructions"] = ""
     state["applied_rules"] = []
     state["knowledge_context"] = []
     state["used_knowledge"] = []
