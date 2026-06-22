@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -29,6 +30,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., example="안녕하세요")
     folder_id: str | None = None
     stream: bool = True
+    channel: Literal["web_chat", "web_call", "voice"] = "web_chat"
 
 
 class ChatResponse(BaseModel):
@@ -108,6 +110,7 @@ async def stream_chat_response(req: ChatRequest):
         session_id=req.session_id,
         user_message=req.message,
         knowledge_folder_id=req.folder_id,
+        channel=req.channel,
     )
     config = graph_config_for(req.organization_id, req.session_id)
 
@@ -208,6 +211,7 @@ async def chat(req: ChatRequest):
                 session_id=req.session_id,
                 user_message=req.message,
                 knowledge_folder_id=req.folder_id,
+                channel=req.channel,
             ),
             config=graph_config_for(req.organization_id, req.session_id),
         )

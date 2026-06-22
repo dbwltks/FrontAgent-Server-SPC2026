@@ -54,6 +54,7 @@ def build_initial_state(
     session_id: str,
     user_message: str,
     knowledge_folder_id: str | None = None,
+    channel: str = "web_chat",
 ) -> dict:
     """
     /chat이 모든 채널(웹/전화/웹콜) 공통으로 사용하는 초기 AgentState를 만든다.
@@ -64,6 +65,7 @@ def build_initial_state(
         "organization_id": organization_id,
         "session_id": session_id,
         "user_message": user_message,
+        "channel": channel,
         "conversation_id": None,
         "ai_enabled": True,
 

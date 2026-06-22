@@ -11,6 +11,7 @@ from app.api import (
     conversations,
     rules,
     task_flows,
+    voice,
 )
 
 app = FastAPI(
@@ -24,6 +25,9 @@ app.include_router(health.router)
 
 # 채팅 API (SSE 스트리밍 지원, 웹/전화/웹콜 등 모든 채널 공통)
 app.include_router(chat.router)
+
+# 브라우저 WebRTC 음성 통화 세션
+app.include_router(voice.router)
 
 # AI 응답 규칙 관리 API
 app.include_router(rules.router)
