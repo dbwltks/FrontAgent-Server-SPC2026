@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import threading
 
 from app.graph.state import AgentState
 from app.rag.retriever import retrieve_knowledge
@@ -183,10 +184,16 @@ async def knowledge_node(state: AgentState) -> AgentState:
         }
     )
 
+    # 참조 카운트 증가는 관리자 통계용 부가 작업으로 응답 생성과 무관하다.
+    # source마다 RPC를 순차 호출해 source 개수에 비례해 지연이 커지므로
+    # 응답 경로를 막지 않게 백그라운드로 던진다.
     if source_ids:
-        try:
-            await asyncio.to_thread(increment_reference_counts, source_ids)
-        except Exception:
-            logger.warning("failed to increment knowledge reference counts", exc_info=True)
+        def _increment_reference_counts():
+            try:
+                increment_reference_counts(source_ids)
+            except Exception:
+                logger.warning("failed to increment knowledge reference counts", exc_info=True)
+
+        threading.Thread(target=_increment_reference_counts, daemon=True).start()
 
     return state
