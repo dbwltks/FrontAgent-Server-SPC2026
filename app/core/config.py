@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     database_url: str
 
     knowledge_upload_max_bytes: int = 20 * 1024 * 1024
+    knowledge_storage_bucket: str = "knowledge-originals"
 
     class Config:
         env_file = ".env"

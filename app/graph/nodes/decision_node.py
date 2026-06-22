@@ -36,11 +36,10 @@ class DecisionResult(BaseModel):
     ]
     use_knowledge: bool
     knowledge_queries: list[str] = Field(default_factory=list)
-    reason: str = ""
 
 
 DECISION_INSTRUCTIONS = f"""
-고객 메시지를 분석해 intent/next_action/task_type/use_knowledge/knowledge_queries/reason을 판단한다.
+고객 메시지를 분석해 intent/next_action/task_type/use_knowledge/knowledge_queries를 판단한다.
 직전 대화 맥락이 주어지면, 후속 질문("그거 얼마야?" 등)의 의도를 맥락에 맞게 판단한다.
 
 규칙:
@@ -58,8 +57,6 @@ knowledge_queries 규칙:
 - 각 항목은 knowledge 검색에 바로 사용할 수 있는 짧고 명확한 한국어 질문으로 만든다.
 - 예약/상담사 연결/인사 요청은 절대 knowledge_queries에 넣지 않는다.
 - 같은 의미의 질문은 중복 제거한다.
-
-reason에는 그렇게 판단한 이유를 한 줄로 적는다.
 """.strip()
 
 
@@ -97,14 +94,18 @@ FALLBACK_DECISION = DecisionResult(
     task_type="none",
     use_knowledge=False,
     knowledge_queries=[],
-    reason="decision LLM 호출 실패로 일반 응답 처리",
 )
 
 
-async def decision_node(state: AgentState) -> AgentState:
+async def decision_node(state: AgentState) -> dict:
     """
     intent 분류용 LLM 호출이 실패(타임아웃, rate limit 등)해도
     전체 응답 생성이 500으로 끊기지 않도록 일반 응답 경로로 fallback한다.
+
+    conversation_node와 병렬(같은 superstep)로 실행되므로, 자신이 바꾸지 않는
+    키(organization_id 등)는 절대 포함하지 않고 변경분만 dict로 반환해야 한다.
+    그렇지 않으면 두 노드가 같은 키에 동시에 값을 쓰는 것으로 인식되어
+    LangGraph가 InvalidUpdateError를 낸다.
     """
     conversation_history = history_from_state_messages(state.get("messages", []))
     user_message = state["user_message"]
@@ -123,20 +124,20 @@ async def decision_node(state: AgentState) -> AgentState:
         logger.warning("decision_node LLM call failed, falling back to general response", exc_info=True)
         decision = FALLBACK_DECISION
 
-    state["intent"] = decision.intent
-    state["next_action"] = decision.next_action
-    state["task_type"] = decision.task_type
-    state["use_knowledge"] = decision.use_knowledge
-    state["knowledge_queries"] = decision.knowledge_queries
-    state["decision_reason"] = decision.reason
-
-    # 기존 should_use_knowledge_node와의 호환용
-    state["should_use_knowledge"] = decision.use_knowledge
+    update: dict = {
+        "intent": decision.intent,
+        "next_action": decision.next_action,
+        "task_type": decision.task_type,
+        "use_knowledge": decision.use_knowledge,
+        "knowledge_queries": decision.knowledge_queries,
+        # 기존 should_use_knowledge_node와의 호환용
+        "should_use_knowledge": decision.use_knowledge,
+    }
 
     # 예약 진행 상태는 messages 히스토리로 표현되지 않으므로 checkpointer가
     # 영속화하는 구조화된 필드(active_task/task_step)에 별도로 유지한다.
     if decision.intent == "reservation":
-        state["active_task"] = "reservation"
-        state["task_step"] = state.get("task_step") or "started"
+        update["active_task"] = "reservation"
+        update["task_step"] = state.get("task_step") or "started"
 
-    return state
+    return update

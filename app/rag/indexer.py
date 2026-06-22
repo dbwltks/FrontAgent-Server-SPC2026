@@ -15,17 +15,32 @@ def create_knowledge_source(
     folder_id: str | None = None,
     file_name: str | None = None,
     mime_type: str | None = None,
+    source_id: str | None = None,
+    storage_bucket: str | None = None,
+    storage_path: str | None = None,
+    file_size: int | None = None,
+    checksum_sha256: str | None = None,
+    status: str = "processing",
 ) -> str:
-    result = supabase.table("knowledge_sources").insert({
+    row = {
         "organization_id": organization_id,
         "folder_id": folder_id,
         "title": title,
         "source_type": source_type,
         "file_name": file_name,
         "mime_type": mime_type,
-        "status": "processing",
+        "storage_bucket": storage_bucket,
+        "storage_path": storage_path,
+        "file_size": file_size,
+        "checksum_sha256": checksum_sha256,
+        "status": status,
         "is_referenced": True,
-    }).execute()
+    }
+
+    if source_id:
+        row["id"] = source_id
+
+    result = supabase.table("knowledge_sources").insert(row).execute()
 
     return result.data[0]["id"]
 
@@ -44,15 +59,17 @@ def index_text(
     source_type: str = "text",
     file_name: str | None = None,
     mime_type: str | None = None,
+    source_id: str | None = None,
 ) -> dict:
-    source_id = create_knowledge_source(
-        organization_id=organization_id,
-        title=title,
-        source_type=source_type,
-        folder_id=folder_id,
-        file_name=file_name,
-        mime_type=mime_type,
-    )
+    if source_id is None:
+        source_id = create_knowledge_source(
+            organization_id=organization_id,
+            title=title,
+            source_type=source_type,
+            folder_id=folder_id,
+            file_name=file_name,
+            mime_type=mime_type,
+        )
 
     try:
         update_source_status(source_id, "chunking")

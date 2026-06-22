@@ -1,4 +1,5 @@
 import asyncio
+import time
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -8,6 +9,12 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import settings
 from app.repositories.organization_repo import get_organization
+
+
+# organizations 설정은 자주 바뀌지 않으므로 매 LLM 호출마다 DB를 왕복하지 않게
+# 짧은 TTL로 캐싱한다. 모델/provider를 바꾼 뒤에는 최대 TTL만큼 지연 반영된다.
+_ORGANIZATION_CACHE_TTL_SECONDS = 60
+_organization_cache: dict[str, tuple[float, dict]] = {}
 
 
 @lru_cache(maxsize=128)
@@ -22,26 +29,45 @@ def _chat_model_for(provider: str, model: str, streaming: bool) -> ChatOpenAI:
     )
 
 
-def _resolve_model_config(organization_id: str) -> tuple[str, str]:
-    organization = get_organization(organization_id)
+def _resolve_organization_config(organization_id: str) -> dict:
+    cached = _organization_cache.get(organization_id)
+    now = time.monotonic()
 
-    if not organization:
-        return "openai", settings.openai_model
+    if cached is not None and now - cached[0] < _ORGANIZATION_CACHE_TTL_SECONDS:
+        return cached[1]
 
-    return (
-        organization.get("llm_provider") or "openai",
-        organization.get("llm_model") or settings.openai_model,
-    )
+    organization = get_organization(organization_id) or {}
+    provider = organization.get("llm_provider") or "openai"
+    model = organization.get("llm_model") or settings.openai_model
+
+    config = {
+        "provider": provider,
+        "model": model,
+        # decision_model이 비어 있으면 응답용 모델을 그대로 분류에도 쓴다.
+        "decision_model": organization.get("decision_model") or model,
+    }
+
+    _organization_cache[organization_id] = (now, config)
+    return config
 
 
 async def get_chat_model(organization_id: str) -> ChatOpenAI:
-    provider, model = await asyncio.to_thread(_resolve_model_config, organization_id)
-    return _chat_model_for(provider, model, streaming=False)
+    config = await asyncio.to_thread(_resolve_organization_config, organization_id)
+    return _chat_model_for(config["provider"], config["model"], streaming=False)
 
 
 async def get_streaming_chat_model(organization_id: str) -> ChatOpenAI:
-    provider, model = await asyncio.to_thread(_resolve_model_config, organization_id)
-    return _chat_model_for(provider, model, streaming=True)
+    config = await asyncio.to_thread(_resolve_organization_config, organization_id)
+    return _chat_model_for(config["provider"], config["model"], streaming=True)
+
+
+async def get_decision_chat_model(organization_id: str) -> ChatOpenAI:
+    """
+    intent 분류(decision_node)는 단순 분류 작업이라 응답 생성용 모델보다
+    가볍고 빠른 모델(organizations.decision_model)을 쓸 수 있게 분리한다.
+    """
+    config = await asyncio.to_thread(_resolve_organization_config, organization_id)
+    return _chat_model_for(config["provider"], config["decision_model"], streaming=False)
 
 
 def _history_to_messages(conversation_history: list[dict] | None) -> list:
@@ -158,7 +184,7 @@ async def generate_structured(
     postprocess를 넘기면 그 RunnableLambda로 schema 인스턴스를 추가 가공한다
     (예: 정규식 fallback으로 knowledge_queries를 보강).
     """
-    model = await get_chat_model(organization_id)
+    model = await get_decision_chat_model(organization_id)
     structured_model = model.with_structured_output(schema)
     chain = _PROMPT | structured_model
 
