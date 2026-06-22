@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 MAX_KNOWLEDGE_QUERIES = 3
 MATCH_COUNT_PER_QUERY = 3
+MAX_KNOWLEDGE_CONTEXT_CHUNKS = 6
+KNOWLEDGE_RETRIEVAL_TIMEOUT_SECONDS = 3.0
 
 
 def fallback_split_knowledge_queries(user_message: str) -> list[str]:
@@ -52,6 +54,36 @@ def fallback_split_knowledge_queries(user_message: str) -> list[str]:
     return queries or [message]
 
 
+def normalize_knowledge_queries(
+    user_message: str,
+    generated_queries: list[str] | None = None,
+) -> list[str]:
+    """원문 질문을 보존하면서 검색어를 최대 3개까지 정규화한다."""
+    message = (user_message or "").strip()
+    candidates = [message, *(generated_queries or [])]
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    for item in candidates:
+        query = " ".join((item or "").split())
+
+        if len(query) < 2:
+            continue
+
+        deduplication_key = query.casefold()
+
+        if deduplication_key in seen:
+            continue
+
+        seen.add(deduplication_key)
+        queries.append(query)
+
+        if len(queries) >= MAX_KNOWLEDGE_QUERIES:
+            break
+
+    return queries
+
+
 def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
     """
     질문별 검색 결과를 기존 knowledge_context 구조와 호환되도록 하나의 배열로 합친다.
@@ -76,7 +108,18 @@ def merge_unique_chunks(knowledge_context_groups: list[dict]) -> list[dict]:
             seen_keys.add(key)
             merged.append(item)
 
-    return merged
+    merged.sort(
+        key=lambda item: float(item.get("similarity") or 0),
+        reverse=True,
+    )
+    return merged[:MAX_KNOWLEDGE_CONTEXT_CHUNKS]
+
+
+async def retrieve_knowledge_with_timeout(**kwargs) -> list[dict]:
+    return await asyncio.wait_for(
+        retrieve_knowledge(**kwargs),
+        timeout=KNOWLEDGE_RETRIEVAL_TIMEOUT_SECONDS,
+    )
 
 
 async def knowledge_node(state: AgentState) -> AgentState:
@@ -90,12 +133,13 @@ async def knowledge_node(state: AgentState) -> AgentState:
     organization_id = state["organization_id"]
     knowledge_folder_id = state.get("knowledge_folder_id")
 
-    knowledge_queries = state.get("knowledge_queries") or fallback_split_knowledge_queries(user_message)
+    generated_queries = state.get("knowledge_queries") or fallback_split_knowledge_queries(user_message)
+    knowledge_queries = normalize_knowledge_queries(user_message, generated_queries)
 
     # 질문 하나의 검색(임베딩 API/Supabase RPC) 실패가 다른 질문 결과까지 막지 않게 한다.
     results = await asyncio.gather(
         *[
-            retrieve_knowledge(
+            retrieve_knowledge_with_timeout(
                 organization_id=organization_id,
                 query=query,
                 match_count=MATCH_COUNT_PER_QUERY,

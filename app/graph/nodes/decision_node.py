@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 
 from app.graph.state import AgentState
 from app.graph.message_utils import history_from_state_messages
-from app.graph.nodes.knowledge_node import fallback_split_knowledge_queries
+from app.graph.nodes.knowledge_node import (
+    fallback_split_knowledge_queries,
+    normalize_knowledge_queries,
+)
 from app.providers.langchain_provider import generate_structured
 
 
@@ -49,7 +52,9 @@ DECISION_INSTRUCTIONS = f"""
 
 knowledge_queries 규칙:
 - use_knowledge가 true일 때만 채운다. 그 외에는 빈 배열로 둔다.
-- 사용자가 여러 정보를 한 번에 물어보면 서로 다른 정보 문의를 최대 {MAX_KNOWLEDGE_QUERIES}개까지 분리한다.
+- 단순 질문은 검색어 1개만 만든다.
+- 사용자가 여러 정보를 한 번에 물어보는 복합 질문일 때만 서로 다른 정보 문의로 분리한다.
+- 원문 질문을 포함한 최종 검색어는 최대 {MAX_KNOWLEDGE_QUERIES}개다.
 - 각 항목은 knowledge 검색에 바로 사용할 수 있는 짧고 명확한 한국어 질문으로 만든다.
 - 예약/상담사 연결/인사 요청은 절대 knowledge_queries에 넣지 않는다.
 - 같은 의미의 질문은 중복 제거한다.
@@ -64,26 +69,8 @@ def _normalize_knowledge_queries(
     if not use_knowledge:
         return []
 
-    queries: list[str] = []
-
-    for item in raw_queries:
-        query = item.strip()
-
-        if len(query) < 2:
-            continue
-
-        if query not in queries:
-            queries.append(query)
-
-        if len(queries) >= MAX_KNOWLEDGE_QUERIES:
-            break
-
-    if queries:
-        return queries
-
-    # 모델이 use_knowledge=true인데 knowledge_queries를 비워서 줄 수 있으므로
-    # 정규식 기반 fallback으로 최소한의 질문 분해를 시도한다.
-    return fallback_split_knowledge_queries(user_message)
+    generated_queries = raw_queries or fallback_split_knowledge_queries(user_message)
+    return normalize_knowledge_queries(user_message, generated_queries)
 
 
 def make_decision_postprocessor(user_message: str) -> RunnableLambda:
