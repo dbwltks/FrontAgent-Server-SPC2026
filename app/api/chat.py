@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -8,7 +9,9 @@ from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_
 
 
 router = APIRouter(tags=["Chat"])
+logger = logging.getLogger(__name__)
 AI_DISABLED_MESSAGE = "AI 자동응답이 꺼져 있어 관리자 응답을 기다립니다."
+AGENT_ERROR_MESSAGE = "Agent response failed"
 
 # LangGraph stream_mode="updates"가 알려주는 노드 완료 이벤트를 SSE trace 이벤트로 변환한다.
 NODE_TRACE_LABELS = {
@@ -175,8 +178,9 @@ async def stream_chat_response(req: ChatRequest):
         )
         yield sse_event("done", {})
 
-    except Exception as e:
-        yield sse_event("error", {"message": f"Agent response failed: {str(e)}"})
+    except Exception:
+        logger.exception("streaming agent response failed")
+        yield sse_event("error", {"message": AGENT_ERROR_MESSAGE})
         yield sse_event("done", {})
 
 
@@ -228,8 +232,9 @@ async def chat(req: ChatRequest):
             knowledge_context=result.get("knowledge_context", []),
         )
 
-    except Exception as e:
+    except Exception:
+        logger.exception("agent response failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Agent response failed: {str(e)}",
+            detail=AGENT_ERROR_MESSAGE,
         )

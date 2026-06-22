@@ -140,6 +140,9 @@ async def knowledge_node(state: AgentState) -> AgentState:
     )
 
     if source_ids:
-        increment_reference_counts(source_ids)
+        try:
+            await asyncio.to_thread(increment_reference_counts, source_ids)
+        except Exception:
+            logger.warning("failed to increment knowledge reference counts", exc_info=True)
 
     return state

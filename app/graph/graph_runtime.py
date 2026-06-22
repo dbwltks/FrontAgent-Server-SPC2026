@@ -66,8 +66,6 @@ def build_initial_state(
         "user_message": user_message,
         "conversation_id": None,
         "ai_enabled": True,
-        "active_task": None,
-        "task_step": None,
 
         # decision_node 결과
         "intent": None,

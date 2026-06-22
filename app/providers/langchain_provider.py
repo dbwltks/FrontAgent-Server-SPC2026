@@ -1,3 +1,4 @@
+import asyncio
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -33,13 +34,13 @@ def _resolve_model_config(organization_id: str) -> tuple[str, str]:
     )
 
 
-def get_chat_model(organization_id: str) -> ChatOpenAI:
-    provider, model = _resolve_model_config(organization_id)
+async def get_chat_model(organization_id: str) -> ChatOpenAI:
+    provider, model = await asyncio.to_thread(_resolve_model_config, organization_id)
     return _chat_model_for(provider, model, streaming=False)
 
 
-def get_streaming_chat_model(organization_id: str) -> ChatOpenAI:
-    provider, model = _resolve_model_config(organization_id)
+async def get_streaming_chat_model(organization_id: str) -> ChatOpenAI:
+    provider, model = await asyncio.to_thread(_resolve_model_config, organization_id)
     return _chat_model_for(provider, model, streaming=True)
 
 
@@ -67,7 +68,7 @@ _PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
-def build_chain(
+async def build_chain(
     organization_id: str,
     parser: RunnableLambda | None = None,
     streaming: bool = False,
@@ -78,7 +79,11 @@ def build_chain(
     parser를 넘기면 모델 응답(AIMessage)을 RunnableLambda로 가공한 결과를 반환하고,
     넘기지 않으면 AIMessage를 그대로 반환한다.
     """
-    model = get_streaming_chat_model(organization_id) if streaming else get_chat_model(organization_id)
+    model = (
+        await get_streaming_chat_model(organization_id)
+        if streaming
+        else await get_chat_model(organization_id)
+    )
     chain = _PROMPT | model
 
     if parser is not None:
@@ -98,7 +103,7 @@ async def generate_text(
     decision_node처럼 한 번에 결과를 받는 비스트리밍 호출.
     parser가 있으면 그 결과(예: dict)를, 없으면 텍스트(str)를 반환한다.
     """
-    chain = build_chain(organization_id, parser=parser, streaming=False)
+    chain = await build_chain(organization_id, parser=parser, streaming=False)
 
     result = await chain.ainvoke(
         {
@@ -123,7 +128,7 @@ async def stream_text(
     """
     response_node가 쓰는 토큰 단위 스트리밍 호출.
     """
-    chain = build_chain(organization_id, streaming=True)
+    chain = await build_chain(organization_id, streaming=True)
 
     async for chunk in chain.astream(
         {
@@ -153,7 +158,8 @@ async def generate_structured(
     postprocess를 넘기면 그 RunnableLambda로 schema 인스턴스를 추가 가공한다
     (예: 정규식 fallback으로 knowledge_queries를 보강).
     """
-    structured_model = get_chat_model(organization_id).with_structured_output(schema)
+    model = await get_chat_model(organization_id)
+    structured_model = model.with_structured_output(schema)
     chain = _PROMPT | structured_model
 
     if postprocess is not None:

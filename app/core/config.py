@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # LangGraph checkpointer가 사용하는 직접 Postgres 연결 (Session pooler)
     database_url: str
 
+    knowledge_upload_max_bytes: int = 20 * 1024 * 1024
+
     class Config:
         env_file = ".env"
 

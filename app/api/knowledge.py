@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -5,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.rag.indexer import index_text
 from app.rag.text_extractor import extract_text_from_file
 from app.repositories.knowledge_repo import (
@@ -17,6 +20,9 @@ from app.repositories.knowledge_repo import (
 
 
 router = APIRouter(tags=["Knowledge"])
+logger = logging.getLogger(__name__)
+UPLOAD_CHUNK_SIZE = 1024 * 1024
+KNOWLEDGE_ERROR_MESSAGE = "Knowledge processing failed"
 
 
 class KnowledgeCreateRequest(BaseModel):
@@ -45,10 +51,11 @@ def create_knowledge(req: KnowledgeCreateRequest):
 
         return result
 
-    except Exception as e:
+    except Exception:
+        logger.exception("knowledge indexing failed")
         raise HTTPException(
             status_code=500,
-            detail=f"Knowledge indexing failed: {str(e)}"
+            detail=KNOWLEDGE_ERROR_MESSAGE,
         )
 
 
@@ -72,12 +79,24 @@ async def upload_knowledge(
                 detail=f"Unsupported file type: {suffix}"
             )
 
+        uploaded_bytes = 0
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
-            content = await file.read()
-            temp_file.write(content)
             temp_file_path = temp_file.name
 
-        extracted_text = extract_text_from_file(
+            while chunk := await file.read(UPLOAD_CHUNK_SIZE):
+                uploaded_bytes += len(chunk)
+
+                if uploaded_bytes > settings.knowledge_upload_max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Uploaded file is too large",
+                    )
+
+                temp_file.write(chunk)
+
+        extracted_text = await asyncio.to_thread(
+            extract_text_from_file,
             file_path=temp_file_path,
             file_name=original_file_name,
         )
@@ -88,7 +107,8 @@ async def upload_knowledge(
                 detail="No text could be extracted from this file."
             )
 
-        result = index_text(
+        result = await asyncio.to_thread(
+            index_text,
             organization_id=organization_id,
             title=original_file_name,
             text=extracted_text,
@@ -108,15 +128,18 @@ async def upload_knowledge(
     except HTTPException:
         raise
 
-    except Exception as e:
+    except Exception:
+        logger.exception("knowledge file upload processing failed")
         raise HTTPException(
             status_code=500,
-            detail=f"File upload indexing failed: {str(e)}"
+            detail=KNOWLEDGE_ERROR_MESSAGE,
         )
 
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+
+        await file.close()
 
 
 @router.get("/knowledge")
