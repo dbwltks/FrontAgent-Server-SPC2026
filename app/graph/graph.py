@@ -1,6 +1,8 @@
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
+from app.graph.nodes.task_node import task_node
+from app.tasks.repository import TaskRepository
 from app.graph.state import AgentState
 from app.graph.nodes.conversation_node import conversation_node
 from app.graph.nodes.ai_handoff_node import ai_handoff_node
@@ -12,22 +14,35 @@ from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
 
+def has_active_task_session(state: AgentState) -> bool:
+    """
+    진행 중 task_session이 있으면 /chat의 현재 메시지를
+    일반 의도 판단 결과보다 태스크 입력으로 우선 처리한다.
+    """
+    try:
+        repository = TaskRepository()
+        active_session = repository.find_active_session(
+            organization_id=state["organization_id"],
+            session_id=state["session_id"],
+        )
+        return active_session is not None
+    except Exception:
+        return False
+
 def route_after_join(state: AgentState) -> str:
     """
-    conversation(DB 조회)과 decision(LLM 분류)을 병렬로 실행한 뒤 합류하는 지점.
+    conversation_node와 decision_node가 끝난 뒤 다음 노드를 결정한다.
 
-    conversation_node의 DB 왕복(상담방 조회/생성)과 decision_node의 LLM 호출은
-    서로의 결과를 필요로 하지 않으므로(decision은 ai_enabled/conversation_id를
-    쓰지 않는다) 동시에 시작해 decision_node의 지연 시간 안에 conversation_node의
-    지연 시간을 숨긴다.
-
-    다만 상담방이 ai_enabled=False(상담원이 직접 응답 중)라면 decision_node가
-    이미 수행한 LLM 분류 결과는 버리고 관리자 응답 대기 상태로 보낸다.
-    이 경우에 한해 decision_node의 LLM 호출 비용이 낭비되지만, 상담원이 메시지
-    수신과 거의 동시에 AI를 끄는 경우는 드물어 감수할 수 있는 트레이드오프다.
+    우선순위:
+    1. AI 자동응답 꺼짐 → ai_handoff
+    2. 진행 중 task_session 있음 → task
+    3. decision_node 결과에 따라 task / knowledge / rule
     """
     if not state.get("ai_enabled", True):
         return "ai_handoff"
+
+    if has_active_task_session(state):
+        return "task"
 
     return route_after_decision(state)
 
@@ -35,22 +50,11 @@ def route_after_join(state: AgentState) -> str:
 def route_after_decision(state: AgentState) -> str:
     """
     decision_node가 결정한 next_action에 따라 다음 노드를 선택한다.
-
-    현재 단계:
-    - search_knowledge → knowledge_node 실행
-    - run_task → 아직 task_node가 없으므로 rule_node로 이동
-    - handoff → 아직 handoff_node가 없으므로 rule_node로 이동
-    - respond_general → rule_node로 이동
-
-    나중에 task_node, handoff_node가 생기면 여기에서 연결만 바꾸면 된다.
-
-    참고: rule_node를 decision_node와 병렬 실행하는 구조도 검토했으나,
-    LangGraph는 fan-in되는 두 경로의 깊이(super-step 수)가 정확히 같아야
-    join 노드가 한 번만 실행된다. knowledge 분기(decision→knowledge, 깊이 2)와
-    rule 분기(깊이 1)의 깊이가 달라 응답 생성이 두 번 실행되는 문제가 확인되어
-    순차 구조를 유지한다.
     """
     next_action = state.get("next_action")
+
+    if next_action == "run_task":
+        return "task"
 
     if next_action == "search_knowledge":
         return "knowledge"
@@ -93,6 +97,7 @@ def build_graph(checkpointer=None):
     graph.add_node("ai_handoff", ai_handoff_node)
     graph.add_node("decision", decision_node)
     graph.add_node("join", join_after_conversation_and_decision)
+    graph.add_node("task", task_node)
     graph.add_node(
         "knowledge",
         knowledge_node,
@@ -117,11 +122,14 @@ def build_graph(checkpointer=None):
         route_after_join,
         {
             "ai_handoff": "ai_handoff",
+            "task": "task",
             "knowledge": "knowledge",
             "rule": "rule",
         },
     )
     graph.add_edge("ai_handoff", END)
+
+    graph.add_edge("task", "save_ai_message")
 
     # Knowledge를 탄 경우에도 최종적으로 rule을 조회한다.
     graph.add_edge("knowledge", "rule")
