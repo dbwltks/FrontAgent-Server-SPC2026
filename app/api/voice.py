@@ -7,6 +7,8 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, Response, Up
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.repositories.ai_usage_repo import create_usage_log_background
+from app.repositories.organization_ai_settings_repo import get_ai_settings
 
 
 router = APIRouter(prefix="/voice", tags=["Voice"])
@@ -19,24 +21,57 @@ OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
 
 class SpeechRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
+    organization_id: str | None = None
+    session_id: str | None = None
+    channel: str = "web_call"
 
 
-def get_voice_mode() -> str:
-    mode = settings.voice_mode.strip().lower()
+def get_voice_mode(organization_id: str | None = None) -> str:
+    if organization_id:
+        mode = str(get_ai_settings(organization_id).get("voice_mode") or "").strip().lower()
+    else:
+        mode = settings.voice_mode.strip().lower()
+
     return mode if mode in {"pipeline", "realtime"} else "pipeline"
 
 
 @router.get("/config")
-async def voice_config():
+async def voice_config(organization_id: str | None = None):
+    if organization_id:
+        ai_settings = get_ai_settings(organization_id)
+        return {
+            "organization_id": organization_id,
+            "enabled": ai_settings.get("voice_enabled", True),
+            "mode": get_voice_mode(organization_id),
+            "stt_model": ai_settings.get("voice_stt_model"),
+            "tts_model": ai_settings.get("voice_tts_model"),
+            "tts_voice": ai_settings.get("voice_tts_voice"),
+            "realtime_model": ai_settings.get("realtime_model"),
+            "realtime_voice": ai_settings.get("realtime_voice"),
+            "response_style": ai_settings.get("voice_response_style"),
+        }
+
     return {
         "mode": get_voice_mode(),
         "stt_model": settings.voice_stt_model,
         "tts_model": settings.voice_tts_model,
+        "tts_voice": settings.voice_tts_voice,
     }
 
 
 @router.post("/transcribe")
-async def transcribe_audio(audio: UploadFile = File(...)):
+async def transcribe_audio(
+    audio: UploadFile = File(...),
+    organization_id: str | None = Query(None),
+    session_id: str | None = Query(None),
+):
+    ai_settings = get_ai_settings(organization_id) if organization_id else None
+    stt_model = (
+        ai_settings.get("voice_stt_model")
+        if ai_settings
+        else settings.voice_stt_model
+    )
+
     content = await audio.read(settings.voice_upload_max_bytes + 1)
     if not content:
         raise HTTPException(status_code=400, detail="Audio file is required")
@@ -51,7 +86,7 @@ async def transcribe_audio(audio: UploadFile = File(...)):
         )
     }
     data = {
-        "model": settings.voice_stt_model,
+        "model": stt_model,
         "language": "ko",
         "response_format": "json",
     }
@@ -78,11 +113,46 @@ async def transcribe_audio(audio: UploadFile = File(...)):
     text = str(openai_response.json().get("text", "")).strip()
     if not text:
         raise HTTPException(status_code=422, detail="No speech was detected")
+
+    if organization_id:
+        create_usage_log_background(
+            {
+                "organization_id": organization_id,
+                "session_id": session_id,
+                "channel": "web_call",
+                "feature": "stt",
+                "provider": "openai",
+                "model": stt_model,
+                "audio_bytes": len(content),
+                "text_chars": len(text),
+                "metadata": {
+                    "filename": audio.filename,
+                    "content_type": audio.content_type,
+                },
+            }
+        )
+
     return {"text": text}
 
 
 @router.post("/speech")
 async def synthesize_speech(payload: SpeechRequest):
+    ai_settings = (
+        get_ai_settings(payload.organization_id)
+        if payload.organization_id
+        else None
+    )
+    tts_model = (
+        ai_settings.get("voice_tts_model")
+        if ai_settings
+        else settings.voice_tts_model
+    )
+    tts_voice = (
+        ai_settings.get("voice_tts_voice")
+        if ai_settings
+        else settings.voice_tts_voice
+    )
+
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             openai_response = await client.post(
@@ -92,8 +162,8 @@ async def synthesize_speech(payload: SpeechRequest):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": settings.voice_tts_model,
-                    "voice": settings.voice_tts_voice,
+                    "model": tts_model,
+                    "voice": tts_voice,
                     "input": payload.text,
                     "response_format": "mp3",
                 },
@@ -110,13 +180,42 @@ async def synthesize_speech(payload: SpeechRequest):
         )
         raise HTTPException(status_code=502, detail="Speech generation failed")
 
+    if payload.organization_id:
+        create_usage_log_background(
+            {
+                "organization_id": payload.organization_id,
+                "session_id": payload.session_id,
+                "channel": payload.channel,
+                "feature": "tts",
+                "provider": "openai",
+                "model": tts_model,
+                "audio_bytes": len(openai_response.content),
+                "text_chars": len(payload.text),
+                "metadata": {
+                    "voice": tts_voice,
+                    "response_format": "mp3",
+                },
+            }
+        )
+
     return Response(content=openai_response.content, media_type="audio/mpeg")
 
 
-def build_realtime_session_config() -> dict:
+def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
+    realtime_model = (
+        ai_settings.get("realtime_model")
+        if ai_settings
+        else settings.openai_realtime_model
+    )
+    realtime_voice = (
+        ai_settings.get("realtime_voice")
+        if ai_settings
+        else settings.openai_realtime_voice
+    )
+
     return {
         "type": "realtime",
-        "model": settings.openai_realtime_model,
+        "model": realtime_model,
         "instructions": (
             "너는 Front Agent의 음성 입출력 인터페이스다. "
             "사용자가 말할 때마다 query_agent 함수를 정확히 한 번 호출하고, "
@@ -133,7 +232,7 @@ def build_realtime_session_config() -> dict:
                 },
             },
             "output": {
-                "voice": settings.openai_realtime_voice,
+                "voice": realtime_voice,
             },
         },
         "tools": [
@@ -164,7 +263,12 @@ async def create_realtime_call(
     organization_id: str = Query(...),
     session_id: str = Query(...),
 ):
-    if get_voice_mode() != "realtime":
+    ai_settings = get_ai_settings(organization_id)
+
+    if not ai_settings.get("voice_enabled", True):
+        raise HTTPException(status_code=409, detail="Voice is disabled")
+
+    if get_voice_mode(organization_id) != "realtime":
         raise HTTPException(status_code=409, detail="Realtime voice mode is disabled")
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/sdp":
         raise HTTPException(status_code=415, detail="Content-Type must be application/sdp")
@@ -182,7 +286,7 @@ async def create_realtime_call(
         "sdp": (None, sdp, "application/sdp"),
         "session": (
             None,
-            json.dumps(build_realtime_session_config(), ensure_ascii=False),
+            json.dumps(build_realtime_session_config(ai_settings), ensure_ascii=False),
             "application/json",
         ),
     }

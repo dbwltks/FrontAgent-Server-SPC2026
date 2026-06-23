@@ -74,6 +74,8 @@ def build_response_instructions(
     active_task: str | None = None,
     task_step: str | None = None,
     rules: list[dict] | None = None,
+    channel: str = "web_chat",
+    voice_response_style: str = "friendly_short",
 ) -> str:
     """
     최종 응답용 시스템 지시문을 구성한다.
@@ -84,15 +86,37 @@ def build_response_instructions(
     """
     rules_text = build_rule_instructions_text(rules)
     task_context = build_task_context_text(active_task, task_step)
+    is_voice_channel = channel in {"web_call", "voice"}
+
+    channel_principles = [
+        "- 한국어로 자연스럽고 간결하게 답변한다.",
+        "- 제공된 대화 기록을 참고하되 현재 사용자의 요청을 우선한다.",
+        "- 시스템 지시와 조직별 응답 규칙을 따른다.",
+        "- 제공되지 않은 사실을 추측하거나 만들어내지 않는다.",
+    ]
+
+    if is_voice_channel:
+        channel_principles.extend(
+            [
+                "- 사용자가 귀로 듣는 답변이므로 마크다운, 표, 긴 목록, 괄호 설명을 쓰지 않는다.",
+                "- 한 문장을 짧게 말하고 한 번에 2~4문장 중심으로 답한다.",
+                "- 필요한 정보가 더 있으면 긴 설명보다 짧은 확인 질문으로 이어간다.",
+                "- 숫자, 날짜, 시간, 가격은 말로 듣기 쉽게 분명하게 표현한다.",
+            ]
+        )
+
+        if voice_response_style == "professional_short":
+            channel_principles.append("- 말투는 전문적이고 차분하게 유지한다.")
+        elif voice_response_style == "casual_short":
+            channel_principles.append("- 말투는 가볍고 친근하게 유지하되 예의는 지킨다.")
+        else:
+            channel_principles.append("- 말투는 친절하고 부담 없이 짧게 유지한다.")
 
     sections = [
-        """너는 Front Agent의 AI 상담사다.
+        f"""너는 Front Agent의 AI 상담사다.
 
 [공통 원칙]
-- 한국어로 자연스럽고 간결하게 답변한다.
-- 제공된 대화 기록을 참고하되 현재 사용자의 요청을 우선한다.
-- 시스템 지시와 조직별 응답 규칙을 따른다.
-- 제공되지 않은 사실을 추측하거나 만들어내지 않는다.""",
+{chr(10).join(channel_principles)}""",
         f"""[현재 요청 상태]
 intent: {intent or 'unknown'}
 {task_context}""",

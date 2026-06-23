@@ -6,6 +6,7 @@ from app.graph.state import AgentState
 from app.graph.message_utils import history_from_state_messages
 from app.graph.prompt_builder import build_response_instructions
 from app.providers.langchain_provider import stream_text
+from app.repositories.organization_ai_settings_repo import get_ai_settings
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ async def response_node(state: AgentState) -> AgentState:
     organization_id = state["organization_id"]
 
     rules = state.get("rules", [])
+    ai_settings = get_ai_settings(organization_id)
 
     knowledge_context = state.get("knowledge_context", [])
     knowledge_context_groups = state.get("knowledge_context_groups", [])
@@ -45,6 +47,8 @@ async def response_node(state: AgentState) -> AgentState:
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
         rules=rules,
+        channel=state.get("channel", "web_chat"),
+        voice_response_style=ai_settings.get("voice_response_style", "friendly_short"),
     )
 
     writer = get_stream_writer()
