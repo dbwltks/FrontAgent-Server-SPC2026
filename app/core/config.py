@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_model: str = "gpt-4.1-mini"
-    openai_realtime_model: str = "gpt-realtime-mini"
+    openai_realtime_model: str = "gpt-realtime-2"
     openai_realtime_voice: str = "marin"
     voice_mode: str = "pipeline"
     voice_stt_model: str = "gpt-4o-mini-transcribe"
