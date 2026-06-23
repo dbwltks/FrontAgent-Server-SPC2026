@@ -1,4 +1,5 @@
 import logging
+import threading
 
 from app.graph.state import AgentState
 from app.repositories.conversation_repo import (
@@ -27,38 +28,39 @@ def save_ai_message_node(state: AgentState) -> AgentState:
     if not conversation_id or not final_response:
         return state
 
-    # 1. AI 응답 메시지 저장
-    saved_message = create_conversation_message(
-        organization_id=organization_id,
-        conversation_id=conversation_id,
-        sender_type="ai",
-        sender_name="Front Agent",
-        message=final_response,
-        metadata={
-            "intent": state.get("intent"),
-            "applied_rules": state.get("applied_rules", []),
-            "used_knowledge": state.get("used_knowledge", []),
-        },
-    )
+    metadata = {
+        "intent": state.get("intent"),
+        "applied_rules": state.get("applied_rules", []),
+        "used_knowledge": state.get("used_knowledge", []),
+    }
 
-    if saved_message is None:
-        logger.warning(
-            "Failed to save AI message: organization_id=%s, conversation_id=%s",
-            organization_id,
-            conversation_id,
-        )
-        return state
-
-    # 2. LangGraph executor 안에서 갱신을 완료해 요청마다 별도 Thread가
-    #    무제한 생성되지 않도록 한다. 목록 갱신 실패는 메시지 저장 결과에
-    #    영향을 주지 않는 best-effort 작업으로 처리한다.
-    try:
-        update_conversation_last_message(
+    def _save_ai_message():
+        saved_message = create_conversation_message(
             organization_id=organization_id,
             conversation_id=conversation_id,
-            last_message=final_response,
+            sender_type="ai",
+            sender_name="Front Agent",
+            message=final_response,
+            metadata=metadata,
         )
-    except Exception:
-        logger.warning("Failed to update AI last_message", exc_info=True)
+
+        if saved_message is None:
+            logger.warning(
+                "Failed to save AI message: organization_id=%s, conversation_id=%s",
+                organization_id,
+                conversation_id,
+            )
+            return
+
+        try:
+            update_conversation_last_message(
+                organization_id=organization_id,
+                conversation_id=conversation_id,
+                last_message=final_response,
+            )
+        except Exception:
+            logger.warning("Failed to update AI last_message", exc_info=True)
+
+    threading.Thread(target=_save_ai_message, daemon=True).start()
 
     return state
