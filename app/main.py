@@ -12,6 +12,7 @@ from app.api import (
     rules,
     task_flows,
     voice,
+    organization_ai_settings,
 )
 
 app = FastAPI(
@@ -28,6 +29,9 @@ app.include_router(chat.router)
 
 # 브라우저 WebRTC 음성 통화 세션
 app.include_router(voice.router)
+
+# 조직별 AI/음성 모델 설정 API
+app.include_router(organization_ai_settings.router)
 
 # AI 응답 규칙 관리 API
 app.include_router(rules.router)

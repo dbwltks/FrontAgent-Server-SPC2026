@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -98,6 +99,10 @@ def sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def elapsed_ms_since(started_at: float) -> int:
+    return int((time.perf_counter() - started_at) * 1000)
+
+
 async def stream_chat_response(req: ChatRequest):
     """
     그래프를 LangGraph 네이티브 스트리밍(astream)으로 실행하며
@@ -116,6 +121,7 @@ async def stream_chat_response(req: ChatRequest):
 
     final_state: dict = {}
     response_started = False
+    started_at = time.perf_counter()
 
     try:
         async for mode, chunk in agent_graph.astream(
@@ -126,10 +132,19 @@ async def stream_chat_response(req: ChatRequest):
             if mode == "custom":
                 if chunk.get("type") == "ai_response_delta":
                     if not response_started:
-                        yield sse_event("response_start", {})
+                        yield sse_event(
+                            "response_start",
+                            {"elapsed_ms": elapsed_ms_since(started_at)},
+                        )
                         response_started = True
 
-                    yield sse_event("delta", {"delta": chunk["delta"]})
+                    yield sse_event(
+                        "delta",
+                        {
+                            "delta": chunk["delta"],
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    )
                 continue
 
             # mode == "updates": {node_name: partial_state}
@@ -148,6 +163,7 @@ async def stream_chat_response(req: ChatRequest):
                         "status": "done",
                         "detail": detail or label,
                         "items": items,
+                        "elapsed_ms": elapsed_ms_since(started_at),
                     },
                 )
 
@@ -157,9 +173,10 @@ async def stream_chat_response(req: ChatRequest):
                 {
                     "message": AI_DISABLED_MESSAGE,
                     "conversation_id": final_state.get("conversation_id"),
+                    "elapsed_ms": elapsed_ms_since(started_at),
                 },
             )
-            yield sse_event("done", {})
+            yield sse_event("done", {"elapsed_ms": elapsed_ms_since(started_at)})
             return
 
         yield sse_event(
@@ -177,14 +194,21 @@ async def stream_chat_response(req: ChatRequest):
                 "applied_rules": final_state.get("applied_rules", []),
                 "used_knowledge": final_state.get("used_knowledge", []),
                 "knowledge_context": final_state.get("knowledge_context", []),
+                "elapsed_ms": elapsed_ms_since(started_at),
             },
         )
-        yield sse_event("done", {})
+        yield sse_event("done", {"elapsed_ms": elapsed_ms_since(started_at)})
 
     except Exception:
         logger.exception("streaming agent response failed")
-        yield sse_event("error", {"message": AGENT_ERROR_MESSAGE})
-        yield sse_event("done", {})
+        yield sse_event(
+            "error",
+            {
+                "message": AGENT_ERROR_MESSAGE,
+                "elapsed_ms": elapsed_ms_since(started_at),
+            },
+        )
+        yield sse_event("done", {"elapsed_ms": elapsed_ms_since(started_at)})
 
 
 @router.post("/chat")
