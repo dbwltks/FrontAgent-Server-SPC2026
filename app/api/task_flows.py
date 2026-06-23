@@ -18,6 +18,81 @@ def get_supabase_client() -> Client:
         settings.supabase_service_role_key,
     )
 
+def ensure_task_flow_exists(client: Client, flow_id: str) -> None:
+    response = (
+        client.table("task_flows")
+        .select("id")
+        .eq("id", flow_id)
+        .limit(1)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Task flow not found.",
+        )
+
+
+def ensure_task_node_exists(
+    client: Client,
+    flow_id: str,
+    node_id: str,
+) -> dict[str, Any]:
+    response = (
+        client.table("task_nodes")
+        .select("*")
+        .eq("id", node_id)
+        .eq("flow_id", flow_id)
+        .limit(1)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Task node not found.",
+        )
+
+    return rows[0]
+
+
+
+
+
+class TaskNodeCreateRequest(BaseModel):
+    node_key: str = Field(..., example="ask_date")
+    node_type: str = Field(..., example="ask")
+    label: str = Field(..., example="예약 날짜 질문")
+
+    config: dict[str, Any] = Field(default_factory=dict)
+    code: str | None = None
+
+    position_x: int = 0
+    position_y: int = 0
+
+    timeout_seconds: int = 10
+    retry_limit: int = 0
+
+
+class TaskNodeUpdateRequest(BaseModel):
+    node_key: str | None = None
+    node_type: str | None = None
+    label: str | None = None
+
+    config: dict[str, Any] | None = None
+    code: str | None = None
+
+    position_x: int | None = None
+    position_y: int | None = None
+
+    timeout_seconds: int | None = None
+    retry_limit: int | None = None
+
 
 class TaskFlowCreateRequest(BaseModel):
     organization_id: str = Field(..., example="00000000-0000-0000-0000-000000000000")
@@ -199,6 +274,141 @@ def delete_task_flow(flow_id: str):
         "deleted": True,
         "flow_id": flow_id,
     }
+
+@router.post("/{flow_id}/nodes")
+def create_task_node(flow_id: str, request: TaskNodeCreateRequest):
+    client = get_supabase_client()
+
+    ensure_task_flow_exists(client, flow_id)
+
+    payload = {
+        "flow_id": flow_id,
+        "node_key": request.node_key,
+        "node_type": request.node_type,
+        "label": request.label,
+        "config": request.config,
+        "code": request.code,
+        "position_x": request.position_x,
+        "position_y": request.position_y,
+        "timeout_seconds": request.timeout_seconds,
+        "retry_limit": request.retry_limit,
+    }
+
+    response = (
+        client.table("task_nodes")
+        .insert(payload)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not rows:
+        raise HTTPException(
+            status_code=500,
+            detail="Task node creation failed.",
+        )
+
+    return rows[0]
+
+
+@router.get("/{flow_id}/nodes")
+def list_task_nodes(flow_id: str):
+    client = get_supabase_client()
+
+    ensure_task_flow_exists(client, flow_id)
+
+    response = (
+        client.table("task_nodes")
+        .select("*")
+        .eq("flow_id", flow_id)
+        .order("created_at")
+        .execute()
+    )
+
+    return {
+        "items": response.data or [],
+        "count": len(response.data or []),
+    }
+
+
+@router.get("/{flow_id}/nodes/{node_id}")
+def get_task_node(flow_id: str, node_id: str):
+    client = get_supabase_client()
+
+    node = ensure_task_node_exists(
+        client=client,
+        flow_id=flow_id,
+        node_id=node_id,
+    )
+
+    return node
+
+
+@router.patch("/{flow_id}/nodes/{node_id}")
+def update_task_node(
+    flow_id: str,
+    node_id: str,
+    request: TaskNodeUpdateRequest,
+):
+    client = get_supabase_client()
+
+    ensure_task_node_exists(
+        client=client,
+        flow_id=flow_id,
+        node_id=node_id,
+    )
+
+    payload = request.model_dump(exclude_unset=True)
+
+    if not payload:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields to update.",
+        )
+
+    response = (
+        client.table("task_nodes")
+        .update(payload)
+        .eq("id", node_id)
+        .eq("flow_id", flow_id)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="Task node not found.",
+        )
+
+    return rows[0]
+
+
+@router.delete("/{flow_id}/nodes/{node_id}")
+def delete_task_node(flow_id: str, node_id: str):
+    client = get_supabase_client()
+
+    ensure_task_node_exists(
+        client=client,
+        flow_id=flow_id,
+        node_id=node_id,
+    )
+
+    (
+        client.table("task_nodes")
+        .delete()
+        .eq("id", node_id)
+        .eq("flow_id", flow_id)
+        .execute()
+    )
+
+    return {
+        "deleted": True,
+        "flow_id": flow_id,
+        "node_id": node_id,
+    }
+
 
 
 @router.post("/{flow_id}/test")
