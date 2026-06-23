@@ -6,6 +6,19 @@ from supabase import create_client
 
 from app.core.config import settings
 
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+from app.repositories.reservation_repo import (
+    NotFoundError,
+    ReservationConflictError,
+    ReservationRepoError,
+    create_reservation as repo_create_reservation,
+    get_available_slots as repo_get_available_slots,
+    get_service as repo_get_service,
+    list_services as repo_list_services,
+)
+
 TaskFunctionHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
@@ -21,6 +34,166 @@ def get_supabase_client():
         settings.supabase_service_role_key,
     )
    
+def _get_value(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+    *keys: str,
+    default: Any = None,
+) -> Any:
+    """
+    Function Node params 값을 우선 사용하고,
+    없으면 task memory variables에서 찾는다.
+    """
+    for key in keys:
+        value = params.get(key)
+        if value is not None and value != "":
+            return value
+
+        value = variables.get(key)
+        if value is not None and value != "":
+            return value
+
+    return default
+
+
+def _parse_date_value(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+
+    if isinstance(value, date):
+        return value
+
+    text = str(value).strip()
+
+    if "T" in text:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+
+    return date.fromisoformat(text)
+
+
+def _parse_time_value(value: Any) -> time:
+    if isinstance(value, time):
+        return value
+
+    text = str(value).strip()
+
+    # "15:00:00" / "15:00" 둘 다 처리 가능
+    return time.fromisoformat(text)
+
+
+def _parse_datetime_value(value: Any, timezone_name: str = "Asia/Seoul") -> datetime:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=ZoneInfo(timezone_name))
+        return value
+
+    text = str(value).strip()
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo(timezone_name))
+
+    return parsed
+
+
+def _build_start_end(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> tuple[datetime | None, datetime | None]:
+    timezone_name = _get_value(
+        params,
+        variables,
+        "timezone",
+        default="Asia/Seoul",
+    )
+
+    start_at_value = _get_value(params, variables, "start_at")
+    end_at_value = _get_value(params, variables, "end_at")
+
+    if start_at_value:
+        start_at = _parse_datetime_value(start_at_value, timezone_name)
+    else:
+        date_value = _get_value(
+            params,
+            variables,
+            "date",
+            "target_date",
+            "normalized_date",
+            "reservation_date",
+        )
+        time_value = _get_value(
+            params,
+            variables,
+            "time",
+            "normalized_time",
+            "reservation_time",
+        )
+
+        if not date_value or not time_value:
+            return None, None
+
+        start_at = datetime.combine(
+            _parse_date_value(date_value),
+            _parse_time_value(time_value),
+            tzinfo=ZoneInfo(timezone_name),
+        )
+
+    if end_at_value:
+        end_at = _parse_datetime_value(end_at_value, timezone_name)
+        return start_at, end_at
+
+    duration_minutes = _get_value(
+        params,
+        variables,
+        "duration_minutes",
+    )
+
+    if not duration_minutes:
+        organization_id = _get_value(params, variables, "organization_id")
+        service_id = _get_value(params, variables, "service_id")
+
+        if organization_id and service_id:
+            service = repo_get_service(
+                organization_id=organization_id,
+                service_id=service_id,
+            )
+            duration_minutes = service.get("duration_minutes")
+
+    if not duration_minutes:
+        return start_at, None
+
+    end_at = start_at + timedelta(minutes=int(duration_minutes))
+
+    return start_at, end_at
+
+
+def _domain_error_result(error: Exception) -> dict[str, Any]:
+    if isinstance(error, NotFoundError):
+        return {
+            "ok": False,
+            "error_code": "not_found",
+            "message": str(error),
+        }
+
+    if isinstance(error, ReservationConflictError):
+        return {
+            "ok": False,
+            "error_code": "reservation_conflict",
+            "message": str(error),
+        }
+
+    if isinstance(error, ReservationRepoError):
+        return {
+            "ok": False,
+            "error_code": "reservation_repo_error",
+            "message": str(error),
+        }
+
+    return {
+        "ok": False,
+        "error_code": "unknown_error",
+        "message": str(error),
+    }
 
 
 def check_required_variables(
@@ -126,6 +299,244 @@ def create_reservation_request(
         "status": "requested",
         "reservation": reservation,
     }
+
+
+def reservation_list_services(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Function Node용 서비스 목록 조회 함수.
+    Task Flow에서 고객에게 예약 가능한 상품/서비스를 보여줄 때 사용한다.
+    """
+    organization_id = _get_value(params, variables, "organization_id")
+
+    if not organization_id:
+        return {
+            "ok": False,
+            "error_code": "organization_id_missing",
+            "message": "organization_id가 필요합니다.",
+            "services": [],
+            "count": 0,
+        }
+
+    try:
+        services = repo_list_services(organization_id=organization_id)
+
+        return {
+            "ok": True,
+            "services": services,
+            "count": len(services),
+        }
+
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
+            {
+                "services": [],
+                "count": 0,
+            }
+        )
+        return result
+
+
+def reservation_get_available_slots(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Function Node용 예약 가능 시간 조회 함수.
+    date만 있으면 가능한 slot 목록을 반환하고,
+    time까지 있으면 해당 시간이 가능한지도 함께 판단한다.
+    """
+    organization_id = _get_value(params, variables, "organization_id")
+    service_id = _get_value(params, variables, "service_id")
+    calendar_id = _get_value(params, variables, "calendar_id")
+    target_date_value = _get_value(
+        params,
+        variables,
+        "date",
+        "target_date",
+        "normalized_date",
+        "reservation_date",
+    )
+    target_time_value = _get_value(
+        params,
+        variables,
+        "time",
+        "normalized_time",
+        "reservation_time",
+    )
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+    if not service_id:
+        missing_keys.append("service_id")
+    if not target_date_value:
+        missing_keys.append("date")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "available": False,
+            "is_available": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "slots": [],
+            "slot_count": 0,
+        }
+
+    try:
+        target_date = _parse_date_value(target_date_value)
+
+        slot_result = repo_get_available_slots(
+            organization_id=organization_id,
+            service_id=service_id,
+            target_date=target_date,
+            calendar_id=calendar_id,
+        )
+
+        slots = slot_result.get("slots") or []
+
+        selected_slot = None
+
+        if target_time_value:
+            target_time = _parse_time_value(target_time_value).strftime("%H:%M")
+
+            for slot in slots:
+                slot_start_at = slot.get("start_at")
+                if not slot_start_at:
+                    continue
+
+                slot_start_time = _parse_datetime_value(
+                    slot_start_at,
+                    slot_result.get("timezone") or "Asia/Seoul",
+                ).strftime("%H:%M")
+
+                if slot_start_time == target_time:
+                    selected_slot = slot
+                    break
+
+            is_available = selected_slot is not None
+
+        else:
+            is_available = len(slots) > 0
+
+        return {
+            "ok": True,
+            "available": is_available,
+            "is_available": is_available,
+            "selected_slot": selected_slot,
+            "slots": slots,
+            "slot_count": len(slots),
+            "service_id": slot_result.get("service_id"),
+            "calendar_id": slot_result.get("calendar_id"),
+            "date": slot_result.get("date"),
+            "timezone": slot_result.get("timezone"),
+        }
+
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
+            {
+                "available": False,
+                "is_available": False,
+                "selected_slot": None,
+                "slots": [],
+                "slot_count": 0,
+            }
+        )
+        return result
+
+
+def reservation_create_reservation(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Function Node용 예약 요청 생성 함수.
+    실제 reservations 테이블에 status=requested 예약을 생성한다.
+    """
+    organization_id = _get_value(params, variables, "organization_id")
+    conversation_id = _get_value(params, variables, "conversation_id")
+    service_id = _get_value(params, variables, "service_id")
+    calendar_id = _get_value(params, variables, "calendar_id")
+
+    customer_name = _get_value(params, variables, "customer_name", "name")
+    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    customer_email = _get_value(params, variables, "customer_email", "email")
+
+    source_channel = _get_value(
+        params,
+        variables,
+        "source_channel",
+        default="web_chat",
+    )
+    memo = _get_value(params, variables, "memo")
+
+    start_at, end_at = _build_start_end(params, variables)
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+    if not service_id:
+        missing_keys.append("service_id")
+    if not customer_name:
+        missing_keys.append("customer_name")
+    if not customer_phone:
+        missing_keys.append("customer_phone")
+    if not start_at:
+        missing_keys.append("start_at")
+    if not end_at:
+        missing_keys.append("end_at")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "created": False,
+            "status": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "reservation_id": None,
+            "reservation": None,
+        }
+
+    try:
+        reservation = repo_create_reservation(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            service_id=service_id,
+            calendar_id=calendar_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_email=customer_email,
+            start_at=start_at,
+            end_at=end_at,
+            source_channel=source_channel,
+            memo=memo,
+        )
+
+        return {
+            "ok": True,
+            "created": True,
+            "status": reservation.get("status"),
+            "reservation_id": reservation.get("id"),
+            "reservation": reservation,
+        }
+
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
+            {
+                "created": False,
+                "status": "failed",
+                "reservation_id": None,
+                "reservation": None,
+            }
+        )
+        return result
 
 
 def lookup_cancelable_reservations(
@@ -477,6 +888,23 @@ FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
         name="cancel_reservation",
         handler=cancel_reservation,
         description="예약을 취소 상태로 변경한다.",
+    ),
+    "reservation.list_services": RegisteredTaskFunction(
+        name="reservation.list_services",
+        handler=reservation_list_services,
+        description="예약 가능한 서비스 목록을 조회한다.",
+    ),
+
+    "reservation.get_available_slots": RegisteredTaskFunction(
+        name="reservation.get_available_slots",
+        handler=reservation_get_available_slots,
+        description="서비스와 날짜 기준으로 예약 가능한 시간을 조회한다.",
+    ),
+
+    "reservation.create_reservation": RegisteredTaskFunction(
+        name="reservation.create_reservation",
+        handler=reservation_create_reservation,
+        description="수집된 고객/서비스/시간 정보로 예약 요청을 생성한다.",
     ),
 }
 
