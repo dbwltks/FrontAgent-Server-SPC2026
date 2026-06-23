@@ -10,7 +10,7 @@ create table public.organization_ai_settings (
   voice_stt_model text not null default 'gpt-4o-mini-transcribe',
   voice_tts_model text not null default 'gpt-4o-mini-tts',
   voice_tts_voice text not null default 'marin',
-  realtime_model text not null default 'gpt-realtime-mini',
+  realtime_model text not null default 'gpt-realtime-2',
   realtime_voice text not null default 'marin',
   voice_response_style text not null default 'friendly_short'
     check (voice_response_style in ('friendly_short', 'professional_short', 'casual_short')),

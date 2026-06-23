@@ -27,7 +27,7 @@ class OrganizationAISettingsUpdateRequest(BaseModel):
     voice_stt_model: str | None = Field(default=None, example="gpt-4o-mini-transcribe")
     voice_tts_model: str | None = Field(default=None, example="gpt-4o-mini-tts")
     voice_tts_voice: str | None = Field(default=None, example="marin")
-    realtime_model: str | None = Field(default=None, example="gpt-realtime-mini")
+    realtime_model: str | None = Field(default=None, example="gpt-realtime-2")
     realtime_voice: str | None = Field(default=None, example="marin")
     voice_response_style: str | None = Field(default=None, example="friendly_short")
     monthly_budget_limit_cents: int | None = Field(default=None, ge=0)
@@ -94,9 +94,9 @@ def get_organization_ai_settings(organization_id: str):
                     "voice_response_style": "friendly_short",
                 },
                 {
-                    "name": "Realtime Mini",
+                    "name": "Realtime Voice",
                     "voice_mode": "realtime",
-                    "realtime_model": "gpt-realtime-mini",
+                    "realtime_model": "gpt-realtime-2",
                     "realtime_voice": "marin",
                     "voice_response_style": "friendly_short",
                 },
