@@ -19,6 +19,62 @@ class TaskRepository:
             settings.supabase_service_role_key,
         )
 
+    def find_enabled_flow_for_task_type(
+        self,
+        organization_id: str,
+        task_type: str,
+    ) -> dict[str, Any] | None:
+        """
+        decision_node가 판단한 task_type에 맞는 활성화된 task_flow를 찾는다.
+
+        1순위: trigger_intent = task_type
+        2순위: 기존 데모 플로우 이름 fallback
+        """
+        response = (
+            self.client.table("task_flows")
+            .select("*")
+            .eq("organization_id", organization_id)
+            .eq("is_enabled", True)
+            .eq("trigger_intent", task_type)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        rows = response.data or []
+
+        if rows:
+            return rows[0]
+
+        fallback_names = {
+            "reservation_create": "예약 생성 플로우",
+            "reservation_lookup": "예약 조회 플로우",
+            "reservation_cancel": "예약 취소 플로우",
+            "reservation_update": "예약 변경 플로우",
+        }
+
+        fallback_name = fallback_names.get(task_type)
+
+        if not fallback_name:
+            return None
+
+        fallback_response = (
+            self.client.table("task_flows")
+            .select("*")
+            .eq("organization_id", organization_id)
+            .eq("is_enabled", True)
+            .eq("name", fallback_name)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+
+        fallback_rows = fallback_response.data or []
+
+        return fallback_rows[0] if fallback_rows else None
+
+
+
     def find_active_session(
         self,
         organization_id: str,

@@ -46,6 +46,10 @@ class AgentState(TypedDict):
     # 나중에 task_node 실행 결과를 저장할 공간
     task_result: Optional[Dict[str, Any]]
 
+    task_handled: bool
+    
+    task_status: Optional[str]
+
     # 기존 should_use_knowledge_node와의 호환용
     # decision_node 구조가 안정화되면 나중에 제거 가능
     should_use_knowledge: bool
