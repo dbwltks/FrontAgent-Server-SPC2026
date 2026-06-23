@@ -12,6 +12,11 @@ ALLOWED_VOICE_RESPONSE_STYLES = {
     "professional_short",
     "casual_short",
 }
+MISSING_TABLE_CODE = "PGRST205"
+
+
+def _is_missing_table_error(error: Exception) -> bool:
+    return MISSING_TABLE_CODE in str(error)
 
 
 def default_ai_settings(organization_id: str) -> dict:
@@ -51,8 +56,14 @@ def get_ai_settings(organization_id: str) -> dict:
             .limit(1)
             .execute()
         )
-    except Exception:
-        logger.warning("failed to fetch organization ai settings", exc_info=True)
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            logger.warning(
+                "organization_ai_settings table is missing; using env defaults. "
+                "Run the Supabase migration before using organization-level AI settings."
+            )
+        else:
+            logger.warning("failed to fetch organization ai settings", exc_info=True)
         return default_ai_settings(organization_id)
 
     if result.data:
@@ -69,8 +80,13 @@ def create_ai_settings(organization_id: str) -> dict | None:
             .insert(default_ai_settings(organization_id))
             .execute()
         )
-    except Exception:
-        logger.warning("failed to create organization ai settings", exc_info=True)
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            logger.warning(
+                "organization_ai_settings table is missing; cannot persist defaults yet."
+            )
+        else:
+            logger.warning("failed to create organization ai settings", exc_info=True)
         return None
 
     if not result.data:
@@ -95,8 +111,13 @@ def update_ai_settings(organization_id: str, data: dict) -> dict | None:
             )
             .execute()
         )
-    except Exception:
-        logger.warning("failed to update organization ai settings", exc_info=True)
+    except Exception as exc:
+        if _is_missing_table_error(exc):
+            logger.warning(
+                "organization_ai_settings table is missing; cannot update settings yet."
+            )
+        else:
+            logger.warning("failed to update organization ai settings", exc_info=True)
         return None
 
     if not result.data:
