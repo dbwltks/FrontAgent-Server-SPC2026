@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from app.repositories.conversation_repo import (
     list_conversations,
     get_conversation,
+    get_conversation_by_session,
     list_conversation_messages,
     create_conversation_message,
     update_conversation_last_message,
@@ -49,6 +50,34 @@ def get_conversation_list(
         "count": len(conversations),
         "items": conversations,
     }
+
+
+@router.get("/conversations/by-session")
+def get_conversation_by_session_api(
+    organization_id: str,
+    session_id: str,
+):
+    """
+    위젯이 자신의 상담방을 polling으로 확인할 때 쓰는 API.
+
+    상담방이 아직 없으면(첫 메시지 전송 전) 404를 반환한다.
+
+    예:
+    GET /conversations/by-session?organization_id=org_test&session_id=chat_123
+    """
+
+    conversation = get_conversation_by_session(
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found",
+        )
+
+    return conversation
 
 
 @router.get("/conversations/{conversation_id}")
