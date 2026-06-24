@@ -29,20 +29,20 @@ router = APIRouter(tags=["Reservations"])
 class ReservationCreateRequest(BaseModel):
     organization_id: str = Field(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     )
     conversation_id: str | None = Field(
         default=None,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     )
 
     service_id: str = Field(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     )
     calendar_id: str = Field(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     )
 
     customer_name: str | None = Field(
@@ -96,7 +96,7 @@ def _handle_repo_error(error: Exception) -> None:
 def list_services_api(
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -121,7 +121,7 @@ def get_service_api(
     service_id: str,
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -147,7 +147,7 @@ def get_service_api(
 def list_booking_calendars_api(
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -168,20 +168,20 @@ def list_booking_calendars_api(
 def get_available_slots_api(
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
     service_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
     target_date: date = Query(
         ...,
         alias="date",
-        example="2026-07-01",
+        examples=["2026-07-01"],
     ),
     calendar_id: str | None = Query(
         default=None,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -243,20 +243,20 @@ def create_reservation_api(
 def list_reservations_api(
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
-    status: str | None = Query(default=None, example="requested"),
+    status: str | None = Query(default=None, examples=["requested"]),
     service_id: str | None = Query(default=None),
     calendar_id: str | None = Query(default=None),
     date_from: datetime | None = Query(
         default=None,
-        example="2026-07-01T00:00:00+09:00",
+        examples=["2026-07-01T00:00:00+09:00"],
     ),
     date_to: datetime | None = Query(
         default=None,
-        example="2026-07-02T00:00:00+09:00",
+        examples=["2026-07-02T00:00:00+09:00"],
     ),
-    customer_phone: str | None = Query(default=None, example="010-1234-5678"),
+    customer_phone: str | None = Query(default=None, examples=["010-1234-5678"]),
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
     """
@@ -288,7 +288,7 @@ def get_reservation_api(
     reservation_id: str,
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -315,7 +315,7 @@ def confirm_reservation_api(
     reservation_id: str,
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -345,7 +345,7 @@ def reject_reservation_api(
     reservation_id: str,
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
@@ -375,7 +375,7 @@ def cancel_reservation_api(
     reservation_id: str,
     organization_id: str = Query(
         ...,
-        example="00000000-0000-0000-0000-000000000000",
+        examples=["00000000-0000-0000-0000-000000000000"],
     ),
 ) -> dict[str, Any]:
     """
