@@ -4,6 +4,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.db import supabase
+from app.repositories.booking_setting_repo import get_or_create_booking_setting
 
 
 RESERVATION_ACTIVE_STATUSES = ["requested", "confirmed"]
@@ -58,143 +59,21 @@ def get_service(organization_id: str, service_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
-def list_booking_calendars(organization_id: str) -> list[dict]:
-    """
-    조직의 활성 예약 캘린더 목록을 조회합니다.
-    """
-    result = (
-        supabase.table("booking_calendars")
-        .select("*")
-        .eq("organization_id", organization_id)
-        .eq("is_active", True)
-        .order("created_at")
-        .execute()
-    )
-
-    return result.data or []
-
-
-def get_booking_calendar(organization_id: str, calendar_id: str) -> dict | None:
-    """
-    calendar_id 기준으로 캘린더 상세 정보를 조회합니다.
-    """
-    result = (
-        supabase.table("booking_calendars")
-        .select("*")
-        .eq("organization_id", organization_id)
-        .eq("id", calendar_id)
-        .limit(1)
-        .execute()
-    )
-
-    rows = result.data or []
-    return rows[0] if rows else None
-
-
-def get_default_calendar_for_service(
-    organization_id: str,
-    service_id: str,
-) -> dict | None:
-    """
-    특정 서비스에 연결된 기본 캘린더를 조회합니다.
-
-    service_calendars
-    → booking_calendars
-    순서로 조회합니다.
-    """
-    mapping_result = (
-        supabase.table("service_calendars")
-        .select("*")
-        .eq("organization_id", organization_id)
-        .eq("service_id", service_id)
-        .eq("is_default", True)
-        .limit(1)
-        .execute()
-    )
-
-    mappings = mapping_result.data or []
-
-    if not mappings:
-        mapping_result = (
-            supabase.table("service_calendars")
-            .select("*")
-            .eq("organization_id", organization_id)
-            .eq("service_id", service_id)
-            .limit(1)
-            .execute()
-        )
-        mappings = mapping_result.data or []
-
-    if not mappings:
-        return None
-
-    calendar_id = mappings[0]["calendar_id"]
-    return get_booking_calendar(organization_id, calendar_id)
-
-
-def get_booking_policy(organization_id: str, service_id: str) -> dict | None:
-    """
-    서비스별 예약 정책을 조회합니다.
-    """
-    result = (
-        supabase.table("booking_policies")
-        .select("*")
-        .eq("organization_id", organization_id)
-        .eq("service_id", service_id)
-        .limit(1)
-        .execute()
-    )
-
-    rows = result.data or []
-    return rows[0] if rows else None
-
-
-def list_availability_rules(
-    organization_id: str,
-    calendar_id: str,
-    day_of_week: int,
-) -> list[dict]:
-    """
-    특정 캘린더의 특정 요일 운영시간 규칙을 조회합니다.
-
-    day_of_week:
-    - 0 = Sunday
-    - 1 = Monday
-    - ...
-    - 6 = Saturday
-    """
-    result = (
-        supabase.table("booking_availability_rules")
-        .select("*")
-        .eq("organization_id", organization_id)
-        .eq("calendar_id", calendar_id)
-        .eq("day_of_week", day_of_week)
-        .eq("is_active", True)
-        .order("start_time")
-        .execute()
-    )
-
-    return result.data or []
-
-
 def find_conflicting_reservations(
     organization_id: str,
-    calendar_id: str,
     start_at: datetime,
     end_at: datetime,
 ) -> list[dict]:
     """
     새 예약 시간과 겹치는 기존 예약을 조회합니다.
 
-    충돌 조건:
-    existing.start_at < new_end_at
-    existing.end_at > new_start_at
+    단순화 구조에서는 조직당 자체 캘린더 1개를 사용하므로
+    calendar_id 조건을 제거합니다.
     """
     result = (
         supabase.table("reservations")
         .select("*")
         .eq("organization_id", organization_id)
-        .eq("calendar_id", calendar_id)
         .in_("status", RESERVATION_ACTIVE_STATUSES)
         .lt("start_at", end_at.isoformat())
         .gt("end_at", start_at.isoformat())
@@ -208,52 +87,65 @@ def get_available_slots(
     organization_id: str,
     service_id: str,
     target_date: date,
-    calendar_id: str | None = None,
 ) -> dict:
     """
     예약 가능한 시간 목록을 계산합니다.
 
     처리 순서:
     1. service 조회
-    2. calendar 조회
-    3. booking_policy 조회
-    4. availability_rules 조회
+    2. booking_settings 조회
+    3. exceptions 반영
+    4. weekly_hours 조회
     5. 기존 reservations와 충돌 제거
     6. 가능한 slot 반환
     """
     service = get_service(organization_id, service_id)
+
     if not service:
         raise NotFoundError("Service not found")
 
-    if calendar_id:
-        calendar = get_booking_calendar(organization_id, calendar_id)
-    else:
-        calendar = get_default_calendar_for_service(organization_id, service_id)
+    setting = get_or_create_booking_setting(organization_id)
 
-    if not calendar:
-        raise NotFoundError("Booking calendar not found")
+    if not setting.get("is_active", True):
+        return {
+            "service_id": service_id,
+            "date": target_date.isoformat(),
+            "timezone": setting.get("timezone") or "Asia/Seoul",
+            "slots": [],
+        }
 
-    policy = get_booking_policy(organization_id, service_id) or {}
-
-    timezone_name = calendar.get("timezone") or "Asia/Seoul"
+    timezone_name = setting.get("timezone") or "Asia/Seoul"
     timezone = ZoneInfo(timezone_name)
 
     duration_minutes = int(service["duration_minutes"])
-    slot_interval_minutes = int(policy.get("slot_interval_minutes") or 30)
+    slot_interval_minutes = int(setting.get("slot_interval_minutes") or 30)
 
-    # Python: Monday=0, Sunday=6
-    # DB 문서 기준: Sunday=0, Monday=1 ... Saturday=6
-    day_of_week = (target_date.weekday() + 1) % 7
+    exception = _find_exception_for_date(
+        exceptions=setting.get("exceptions") or [],
+        target_date=target_date,
+    )
 
-    rules = list_availability_rules(
-        organization_id=organization_id,
-        calendar_id=calendar["id"],
-        day_of_week=day_of_week,
+    if exception and exception.get("is_closed") is True:
+        return {
+            "service_id": service_id,
+            "date": target_date.isoformat(),
+            "timezone": timezone_name,
+            "slots": [],
+            "reason": exception.get("reason") or "closed",
+        }
+
+    rules = _get_rules_for_date(
+        setting=setting,
+        target_date=target_date,
+        exception=exception,
     )
 
     slots: list[dict] = []
 
     for rule in rules:
+        if rule.get("is_active") is False:
+            continue
+
         current_start = _combine_date_and_time(
             target_date,
             _parse_time(rule["start_time"]),
@@ -268,26 +160,30 @@ def get_available_slots(
         while current_start + timedelta(minutes=duration_minutes) <= rule_end:
             current_end = current_start + timedelta(minutes=duration_minutes)
 
-            conflicts = find_conflicting_reservations(
-                organization_id=organization_id,
-                calendar_id=calendar["id"],
-                start_at=current_start,
-                end_at=current_end,
-            )
-
-            if not conflicts:
-                slots.append(
-                    {
-                        "start_at": current_start.isoformat(),
-                        "end_at": current_end.isoformat(),
-                    }
+            if _is_allowed_by_notice_policy(
+                target_date=target_date,
+                slot_start=current_start,
+                setting=setting,
+                timezone=timezone,
+            ):
+                conflicts = find_conflicting_reservations(
+                    organization_id=organization_id,
+                    start_at=current_start,
+                    end_at=current_end,
                 )
+
+                if not conflicts:
+                    slots.append(
+                        {
+                            "start_at": current_start.isoformat(),
+                            "end_at": current_end.isoformat(),
+                        }
+                    )
 
             current_start += timedelta(minutes=slot_interval_minutes)
 
     return {
         "service_id": service_id,
-        "calendar_id": calendar["id"],
         "date": target_date.isoformat(),
         "timezone": timezone_name,
         "slots": slots,
@@ -318,12 +214,14 @@ def create_or_get_customer(
         )
 
         rows = result.data or []
+
         if rows:
             customer = rows[0]
-
             update_data: dict = {}
+
             if name and not customer.get("name"):
                 update_data["name"] = name
+
             if email and not customer.get("email"):
                 update_data["email"] = email
 
@@ -334,6 +232,7 @@ def create_or_get_customer(
                     .eq("id", customer["id"])
                     .execute()
                 )
+
                 updated_rows = update_result.data or []
                 return updated_rows[0] if updated_rows else customer
 
@@ -359,7 +258,6 @@ def create_or_get_customer(
 def create_reservation(
     organization_id: str,
     service_id: str,
-    calendar_id: str,
     customer_name: str | None,
     customer_phone: str | None,
     customer_email: str | None,
@@ -377,25 +275,25 @@ def create_reservation(
     확정은 confirm_reservation()에서 처리합니다.
     """
     service = get_service(organization_id, service_id)
+
     if not service:
         raise NotFoundError("Service not found")
-
-    calendar = get_booking_calendar(organization_id, calendar_id)
-    if not calendar:
-        raise NotFoundError("Booking calendar not found")
 
     if start_at >= end_at:
         raise ReservationRepoError("start_at must be earlier than end_at")
 
+    setting = get_or_create_booking_setting(organization_id)
+
     conflicts = find_conflicting_reservations(
         organization_id=organization_id,
-        calendar_id=calendar_id,
         start_at=start_at,
         end_at=end_at,
     )
 
     if conflicts:
-        raise ReservationConflictError("Reservation time conflicts with existing reservation")
+        raise ReservationConflictError(
+            "Reservation time conflicts with existing reservation"
+        )
 
     customer = create_or_get_customer(
         organization_id=organization_id,
@@ -409,13 +307,12 @@ def create_reservation(
         "conversation_id": conversation_id,
         "customer_id": customer["id"],
         "service_id": service_id,
-        "calendar_id": calendar_id,
         "customer_name": customer_name,
         "customer_phone": customer_phone,
         "customer_email": customer_email,
         "start_at": start_at.isoformat(),
         "end_at": end_at.isoformat(),
-        "timezone": calendar.get("timezone") or "Asia/Seoul",
+        "timezone": setting.get("timezone") or "Asia/Seoul",
         "status": "requested",
         "source_channel": source_channel,
         "memo": memo,
@@ -435,7 +332,6 @@ def list_reservations(
     organization_id: str,
     status: str | None = None,
     service_id: str | None = None,
-    calendar_id: str | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     customer_phone: str | None = None,
@@ -443,6 +339,7 @@ def list_reservations(
 ) -> list[dict]:
     """
     예약 목록을 조회합니다.
+
     관리자 화면과 Swagger 테스트에서 사용합니다.
     """
     query = (
@@ -458,9 +355,6 @@ def list_reservations(
 
     if service_id:
         query = query.eq("service_id", service_id)
-
-    if calendar_id:
-        query = query.eq("calendar_id", calendar_id)
 
     if date_from:
         query = query.gte("start_at", date_from.isoformat())
@@ -501,10 +395,10 @@ def confirm_reservation(
 ) -> dict:
     """
     예약을 확정 상태로 변경합니다.
-
     확정 직전에도 다시 충돌을 확인합니다.
     """
     reservation = get_reservation(organization_id, reservation_id)
+
     if not reservation:
         raise NotFoundError("Reservation not found")
 
@@ -521,25 +415,29 @@ def confirm_reservation(
 
     conflicts = find_conflicting_reservations(
         organization_id=organization_id,
-        calendar_id=reservation["calendar_id"],
         start_at=start_at,
         end_at=end_at,
     )
 
     conflicts = [
-        conflict for conflict in conflicts
+        conflict
+        for conflict in conflicts
         if conflict["id"] != reservation_id
     ]
 
     if conflicts:
-        raise ReservationConflictError("Reservation time conflicts with existing reservation")
+        raise ReservationConflictError(
+            "Reservation time conflicts with existing reservation"
+        )
 
     result = (
         supabase.table("reservations")
         .update(
             {
                 "status": "confirmed",
-                "confirmed_at": datetime.now(tz=ZoneInfo("Asia/Seoul")).isoformat(),
+                "confirmed_at": datetime.now(
+                    tz=ZoneInfo("Asia/Seoul")
+                ).isoformat(),
             }
         )
         .eq("organization_id", organization_id)
@@ -548,6 +446,7 @@ def confirm_reservation(
     )
 
     rows = result.data or []
+
     if not rows:
         raise ReservationRepoError("Failed to confirm reservation")
 
@@ -562,6 +461,7 @@ def reject_reservation(
     예약 요청을 거절 상태로 변경합니다.
     """
     reservation = get_reservation(organization_id, reservation_id)
+
     if not reservation:
         raise NotFoundError("Reservation not found")
 
@@ -579,6 +479,7 @@ def reject_reservation(
     )
 
     rows = result.data or []
+
     if not rows:
         raise ReservationRepoError("Failed to reject reservation")
 
@@ -593,6 +494,7 @@ def cancel_reservation(
     예약을 취소 상태로 변경합니다.
     """
     reservation = get_reservation(organization_id, reservation_id)
+
     if not reservation:
         raise NotFoundError("Reservation not found")
 
@@ -606,7 +508,9 @@ def cancel_reservation(
         .update(
             {
                 "status": "cancelled",
-                "cancelled_at": datetime.now(tz=ZoneInfo("Asia/Seoul")).isoformat(),
+                "cancelled_at": datetime.now(
+                    tz=ZoneInfo("Asia/Seoul")
+                ).isoformat(),
             }
         )
         .eq("organization_id", organization_id)
@@ -615,16 +519,97 @@ def cancel_reservation(
     )
 
     rows = result.data or []
+
     if not rows:
         raise ReservationRepoError("Failed to cancel reservation")
 
     return rows[0]
 
 
+def _find_exception_for_date(
+    exceptions: list[dict],
+    target_date: date,
+) -> dict | None:
+    target_date_text = target_date.isoformat()
+
+    for exception in exceptions:
+        if exception.get("date") == target_date_text:
+            return exception
+
+    return None
+
+
+def _get_rules_for_date(
+    setting: dict,
+    target_date: date,
+    exception: dict | None = None,
+) -> list[dict]:
+    """
+    특정 날짜에 적용할 운영시간 규칙을 반환합니다.
+
+    우선순위:
+    1. 특정일 예외 운영시간
+    2. weekly_hours 반복 운영시간
+    """
+    if exception and exception.get("is_closed") is False:
+        start_time = exception.get("start_time")
+        end_time = exception.get("end_time")
+
+        if start_time and end_time:
+            return [
+                {
+                    "day_of_week": None,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "is_active": True,
+                }
+            ]
+
+    # Python: Monday=0, Sunday=6
+    # DB 문서 기준: Sunday=0, Monday=1 ... Saturday=6
+    day_of_week = (target_date.weekday() + 1) % 7
+
+    rules = []
+
+    for rule in setting.get("weekly_hours") or []:
+        if int(rule.get("day_of_week")) == day_of_week:
+            rules.append(rule)
+
+    return rules
+
+
+def _is_allowed_by_notice_policy(
+    target_date: date,
+    slot_start: datetime,
+    setting: dict,
+    timezone: ZoneInfo,
+) -> bool:
+    """
+    최소 예약 가능 시간과 최대 예약 가능 기간을 검사합니다.
+    """
+    now = datetime.now(tz=timezone)
+
+    min_notice_minutes = int(setting.get("min_notice_minutes") or 0)
+    max_days_ahead = int(setting.get("max_days_ahead") or 365)
+
+    if slot_start < now + timedelta(minutes=min_notice_minutes):
+        return False
+
+    max_date = now.date() + timedelta(days=max_days_ahead)
+
+    if target_date > max_date:
+        return False
+
+    return True
+
+
 def _parse_time(value: str) -> time:
     """
     Supabase time 값을 Python time으로 변환합니다.
-    예: '10:00:00' 또는 '10:00'
+
+    예:
+    - '10:00:00'
+    - '10:00'
     """
     if len(value) == 5:
         return time.fromisoformat(value)
