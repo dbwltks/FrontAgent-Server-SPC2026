@@ -38,6 +38,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     organization_id: str
     session_id: str
+    conversation_id: str | None = None
 
     # decision_node 결과
     intent: str
@@ -268,6 +269,7 @@ async def chat(req: ChatRequest):
         return ChatResponse(
             organization_id=req.organization_id,
             session_id=req.session_id,
+            conversation_id=result.get("conversation_id"),
 
             # decision_node 결과
             intent=result.get("intent", "general"),
