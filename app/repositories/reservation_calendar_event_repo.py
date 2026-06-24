@@ -17,30 +17,25 @@ def utc_now_iso() -> str:
 def create_calendar_event_mapping(
     organization_id: str,
     reservation_id: str,
-    calendar_id: str | None = None,
     provider: str = "google",
+    external_calendar_id: str | None = None,
     external_event_id: str | None = None,
     external_event_url: str | None = None,
     sync_status: str = "pending",
     error_message: str | None = None,
 ) -> dict[str, Any]:
     """
-    예약과 외부 캘린더 이벤트의 매핑 정보를 생성한다.
+    예약과 외부 캘린더 이벤트의 매핑 정보를 생성합니다.
 
-    Google Calendar 이벤트 생성 전이면:
-    - sync_status = pending
-    - external_event_id = None
-
-    Google Calendar 이벤트 생성 후이면:
-    - sync_status = synced
-    - external_event_id = Google event id
+    external_calendar_id:
+    - Google Calendar ID
+    - MVP에서는 기본적으로 "primary" 사용
     """
-
     insert_data = {
         "organization_id": organization_id,
         "reservation_id": reservation_id,
-        "calendar_id": calendar_id,
         "provider": provider,
+        "external_calendar_id": external_calendar_id,
         "external_event_id": external_event_id,
         "external_event_url": external_event_url,
         "sync_status": sync_status,
@@ -69,9 +64,8 @@ def get_calendar_event_mapping_by_reservation(
     provider: str = "google",
 ) -> dict[str, Any] | None:
     """
-    reservation_id 기준으로 외부 캘린더 이벤트 매핑을 조회한다.
+    reservation_id 기준으로 외부 캘린더 이벤트 매핑을 조회합니다.
     """
-
     result = (
         supabase.table("reservation_calendar_events")
         .select("*")
@@ -87,18 +81,18 @@ def get_calendar_event_mapping_by_reservation(
 
     return rows[0] if rows else None
 
+
 def mark_calendar_event_pending(
     organization_id: str,
     reservation_id: str,
-    calendar_id: str | None = None,
     provider: str = "google",
+    external_calendar_id: str | None = None,
     error_message: str | None = None,
 ) -> dict[str, Any]:
     """
-    Google Calendar 연동 대상이지만 아직 이벤트 생성 전인 상태를 pending으로 저장한다.
-    기존 매핑이 있으면 갱신하고, 없으면 생성한다.
+    Google Calendar 연동 대상이지만 아직 이벤트 생성 전인 상태를 pending으로 저장합니다.
+    기존 매핑이 있으면 갱신하고, 없으면 생성합니다.
     """
-
     existing = get_calendar_event_mapping_by_reservation(
         organization_id=organization_id,
         reservation_id=reservation_id,
@@ -106,7 +100,7 @@ def mark_calendar_event_pending(
     )
 
     update_data = {
-        "calendar_id": calendar_id,
+        "external_calendar_id": external_calendar_id,
         "sync_status": "pending",
         "error_message": error_message,
         "updated_at": utc_now_iso(),
@@ -133,8 +127,8 @@ def mark_calendar_event_pending(
     return create_calendar_event_mapping(
         organization_id=organization_id,
         reservation_id=reservation_id,
-        calendar_id=calendar_id,
         provider=provider,
+        external_calendar_id=external_calendar_id,
         sync_status="pending",
         error_message=error_message,
     )
@@ -146,12 +140,12 @@ def mark_calendar_event_synced(
     external_event_id: str,
     external_event_url: str | None = None,
     provider: str = "google",
+    external_calendar_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Google Calendar 이벤트 생성 성공 후 매핑 정보를 synced 상태로 갱신한다.
-    기존 매핑이 없으면 새로 생성한다.
+    Google Calendar 이벤트 생성 성공 후 매핑 정보를 synced 상태로 갱신합니다.
+    기존 매핑이 없으면 새로 생성합니다.
     """
-
     existing = get_calendar_event_mapping_by_reservation(
         organization_id=organization_id,
         reservation_id=reservation_id,
@@ -159,6 +153,7 @@ def mark_calendar_event_synced(
     )
 
     update_data = {
+        "external_calendar_id": external_calendar_id,
         "external_event_id": external_event_id,
         "external_event_url": external_event_url,
         "sync_status": "synced",
@@ -188,6 +183,7 @@ def mark_calendar_event_synced(
         organization_id=organization_id,
         reservation_id=reservation_id,
         provider=provider,
+        external_calendar_id=external_calendar_id,
         external_event_id=external_event_id,
         external_event_url=external_event_url,
         sync_status="synced",
@@ -198,13 +194,12 @@ def mark_calendar_event_failed(
     organization_id: str,
     reservation_id: str,
     error_message: str,
-    calendar_id: str | None = None,
     provider: str = "google",
+    external_calendar_id: str | None = None,
 ) -> dict[str, Any]:
     """
-    Google Calendar 이벤트 생성/수정/삭제 실패 시 failed 상태로 저장한다.
+    Google Calendar 이벤트 생성/수정/삭제 실패 시 failed 상태로 저장합니다.
     """
-
     existing = get_calendar_event_mapping_by_reservation(
         organization_id=organization_id,
         reservation_id=reservation_id,
@@ -212,6 +207,7 @@ def mark_calendar_event_failed(
     )
 
     update_data = {
+        "external_calendar_id": external_calendar_id,
         "sync_status": "failed",
         "error_message": error_message,
         "updated_at": utc_now_iso(),
@@ -238,8 +234,8 @@ def mark_calendar_event_failed(
     return create_calendar_event_mapping(
         organization_id=organization_id,
         reservation_id=reservation_id,
-        calendar_id=calendar_id,
         provider=provider,
+        external_calendar_id=external_calendar_id,
         sync_status="failed",
         error_message=error_message,
     )
@@ -251,9 +247,8 @@ def mark_calendar_event_cancelled(
     provider: str = "google",
 ) -> dict[str, Any] | None:
     """
-    예약 취소 후 외부 캘린더 이벤트 매핑 상태를 cancelled로 변경한다.
+    예약 취소 후 외부 캘린더 이벤트 매핑 상태를 cancelled로 변경합니다.
     """
-
     existing = get_calendar_event_mapping_by_reservation(
         organization_id=organization_id,
         reservation_id=reservation_id,

@@ -267,7 +267,6 @@ def _format_reservation_option(
         "customer_name": reservation.get("customer_name"),
         "customer_phone": reservation.get("customer_phone"),
         "service_id": reservation.get("service_id"),
-        "calendar_id": reservation.get("calendar_id"),
         "start_at": reservation.get("start_at"),
         "end_at": reservation.get("end_at"),
         "status": reservation.get("status"),
