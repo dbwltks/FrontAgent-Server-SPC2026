@@ -16,6 +16,10 @@ class AgentState(TypedDict):
     # 현재 상담방의 AI 자동응답 여부
     ai_enabled: bool
 
+    # 진행 중 task_session 여부. conversation_node(병렬 브랜치)가 미리 조회해
+    # join 라우팅이 동기 DB 호출 없이 분기하도록 한다.
+    has_active_task: bool
+
     # 멀티턴 대화 히스토리. checkpointer가 thread_id(=organization_id:session_id) 기준으로
     # 자동 저장/복원한다. add_messages reducer가 매 턴 새 메시지를 누적시켜준다.
     messages: Annotated[list, add_messages]

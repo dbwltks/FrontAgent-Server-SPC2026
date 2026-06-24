@@ -43,6 +43,21 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn("검색 결과: 없음", prompt)
         self.assertIn("해당 정보를 확인하지 못했다고", prompt)
 
+    def test_voice_prompt_asks_for_accurate_non_trivial_answer(self):
+        prompt = build_response_instructions(
+            intent="pricing",
+            knowledge_context=[],
+            use_knowledge=False,
+            rules=[],
+            channel="web_call",
+        )
+
+        self.assertIn("실제 상담원처럼", prompt)
+        self.assertIn("대화하듯 말한다", prompt)
+        self.assertIn("핵심 답변, 중요한 조건, 다음 행동", prompt)
+        self.assertIn("내부 구현 단어", prompt)
+        self.assertNotIn("AI 상담사", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

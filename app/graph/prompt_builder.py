@@ -88,41 +88,51 @@ def build_response_instructions(
     task_context = build_task_context_text(active_task, task_step)
     is_voice_channel = channel in {"web_call", "voice"}
 
-    channel_principles = [
-        "- 한국어로 자연스럽고 간결하게 답변한다.",
-        "- 제공된 대화 기록을 참고하되 현재 사용자의 요청을 우선한다.",
-        "- 시스템 지시와 조직별 응답 규칙을 따른다.",
-        "- 제공되지 않은 사실을 추측하거나 만들어내지 않는다.",
-    ]
-
     if is_voice_channel:
-        channel_principles.extend(
-            [
-                "- 사용자가 귀로 듣는 답변이므로 마크다운, 표, 긴 목록, 괄호 설명을 쓰지 않는다.",
-                "- 한 문장을 짧게 말하고 한 번에 2~4문장 중심으로 답한다.",
-                "- 필요한 정보가 더 있으면 긴 설명보다 짧은 확인 질문으로 이어간다.",
-                "- 숫자, 날짜, 시간, 가격은 말로 듣기 쉽게 분명하게 표현한다.",
-            ]
-        )
-
+        style_instruction = "- 말투는 친절하고 자연스럽게 유지한다. 너무 가볍거나 성의 없는 단답처럼 들리지 않게 한다."
         if voice_response_style == "professional_short":
-            channel_principles.append("- 말투는 전문적이고 차분하게 유지한다.")
+            style_instruction = "- 말투는 차분하고 전문적으로 유지하되, 안내문처럼 딱딱하게 읽지 않는다."
         elif voice_response_style == "casual_short":
-            channel_principles.append("- 말투는 가볍고 친근하게 유지하되 예의는 지킨다.")
-        else:
-            channel_principles.append("- 말투는 친절하고 부담 없이 짧게 유지한다.")
+            style_instruction = "- 말투는 편하고 친근하게 유지하되, 반말이나 과한 감탄사는 쓰지 않는다."
 
-    sections = [
-        f"""너는 Front Agent의 AI 상담사다.
+        sections = [
+            f"""너는 전화 상담을 받는 실제 상담원처럼 응답한다.
+사용자는 화면을 보는 것이 아니라 귀로 듣고 있으므로, 문장을 읽는 느낌이 아니라 대화하듯 말한다.
+
+[말투와 전달 방식]
+- 첫 문장은 바로 답부터 자연스럽게 말한다. "문의해 주셔서 감사합니다", "고객님" 같은 상투적인 시작을 반복하지 않는다.
+- "제가 확인한 내용으로는", "말씀하신 기준이면", "현재 확인되는 내용은"처럼 사람이 설명하는 연결어를 적절히 사용한다.
+- 단답으로 끝내지 말고 핵심 답변, 중요한 조건, 다음 행동을 이어서 말한다.
+- 한 문장은 짧게 유지하되, 필요한 설명은 3~5문장 정도로 충분히 말한다.
+- 마크다운, 표, 번호 목록, 괄호 설명, 출처 라벨은 말하지 않는다.
+- 시스템, 데이터베이스, 지식 검색, 프롬프트, AI 같은 내부 구현 단어를 사용자에게 말하지 않는다.
+- 모르는 내용은 추측하지 말고 "그 부분은 현재 확인되지 않습니다"처럼 분명히 말한 뒤 필요한 정보를 물어본다.
+- 숫자, 날짜, 시간, 가격은 말로 듣기 쉽게 표현한다.
+{style_instruction}""",
+            f"""[현재 요청 상태]
+intent: {intent or 'unknown'}
+{task_context}""",
+            f"""[조직별 응답 규칙]
+{rules_text}""",
+        ]
+    else:
+        channel_principles = [
+            "- 한국어로 자연스럽고 간결하게 답변한다.",
+            "- 제공된 대화 기록을 참고하되 현재 사용자의 요청을 우선한다.",
+            "- 시스템 지시와 조직별 응답 규칙을 따른다.",
+            "- 제공되지 않은 사실을 추측하거나 만들어내지 않는다.",
+        ]
+        sections = [
+            f"""너는 Front Agent의 AI 상담사다.
 
 [공통 원칙]
 {chr(10).join(channel_principles)}""",
-        f"""[현재 요청 상태]
+            f"""[현재 요청 상태]
 intent: {intent or 'unknown'}
 {task_context}""",
-        f"""[조직별 응답 규칙]
+            f"""[조직별 응답 규칙]
 {rules_text}""",
-    ]
+        ]
 
     if use_knowledge:
         knowledge_text = (

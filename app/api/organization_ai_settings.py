@@ -2,11 +2,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.repositories.organization_ai_settings_repo import (
+    ALLOWED_TTS_PROVIDERS,
     ALLOWED_VOICE_MODES,
     ALLOWED_VOICE_RESPONSE_STYLES,
     get_ai_settings,
     update_ai_settings,
     validate_model_name,
+    validate_tts_provider,
     validate_voice_mode,
     validate_voice_response_style,
 )
@@ -25,8 +27,11 @@ class OrganizationAISettingsUpdateRequest(BaseModel):
     voice_enabled: bool | None = None
     voice_mode: str | None = Field(default=None, example="pipeline")
     voice_stt_model: str | None = Field(default=None, example="gpt-4o-mini-transcribe")
+    voice_tts_provider: str | None = Field(default=None, example="openai")
     voice_tts_model: str | None = Field(default=None, example="gpt-4o-mini-tts")
     voice_tts_voice: str | None = Field(default=None, example="marin")
+    elevenlabs_model: str | None = Field(default=None, example="eleven_flash_v2_5")
+    elevenlabs_voice_id: str | None = Field(default=None, example="21m00Tcm4TlvDq8ikWAM")
     realtime_model: str | None = Field(default=None, example="gpt-realtime-2")
     realtime_voice: str | None = Field(default=None, example="marin")
     voice_response_style: str | None = Field(default=None, example="friendly_short")
@@ -54,6 +59,8 @@ def normalize_update_data(req: OrganizationAISettingsUpdateRequest) -> dict:
         "voice_stt_model",
         "voice_tts_model",
         "voice_tts_voice",
+        "elevenlabs_model",
+        "elevenlabs_voice_id",
         "realtime_model",
         "realtime_voice",
     ]
@@ -62,6 +69,9 @@ def normalize_update_data(req: OrganizationAISettingsUpdateRequest) -> dict:
         for field in model_fields:
             if field in raw:
                 raw[field] = validate_model_name(raw[field], field)
+
+        if "voice_tts_provider" in raw:
+            raw["voice_tts_provider"] = validate_tts_provider(raw["voice_tts_provider"])
 
         if "voice_mode" in raw:
             raw["voice_mode"] = validate_voice_mode(raw["voice_mode"])
@@ -83,14 +93,25 @@ def get_organization_ai_settings(organization_id: str):
         "settings": get_ai_settings(organization_id),
         "options": {
             "voice_modes": sorted(ALLOWED_VOICE_MODES),
+            "tts_providers": sorted(ALLOWED_TTS_PROVIDERS),
             "voice_response_styles": sorted(ALLOWED_VOICE_RESPONSE_STYLES),
             "recommended_templates": [
                 {
                     "name": "저비용 Pipeline",
                     "voice_mode": "pipeline",
                     "voice_stt_model": "gpt-4o-mini-transcribe",
+                    "voice_tts_provider": "openai",
                     "voice_tts_model": "gpt-4o-mini-tts",
                     "voice_tts_voice": "marin",
+                    "voice_response_style": "friendly_short",
+                },
+                {
+                    "name": "자연스러운 한국어 (ElevenLabs)",
+                    "voice_mode": "pipeline",
+                    "voice_stt_model": "gpt-4o-transcribe",
+                    "voice_tts_provider": "elevenlabs",
+                    "elevenlabs_model": "eleven_flash_v2_5",
+                    "elevenlabs_voice_id": "",
                     "voice_response_style": "friendly_short",
                 },
                 {
