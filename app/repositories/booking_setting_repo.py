@@ -72,55 +72,28 @@ def get_or_create_booking_setting(organization_id: str) -> dict[str, Any]:
     return create_default_booking_setting(organization_id)
 
 
-def update_booking_setting(
-    organization_id: str,
-    update_data: dict[str, Any],
-) -> dict[str, Any]:
+def update_booking_setting(organization_id: str, update_data: dict) -> dict:
     """
-    조직의 예약 설정을 수정합니다.
-
-    사장님이 관리자 화면에서 예약 정책/운영시간/휴무일을 수정할 때 사용합니다.
+    organization_id 기준으로 booking_settings를 수정한다.
+    PATCH 요청에서 전달된 필드만 업데이트한다.
     """
-    allowed_fields = {
-        "name",
-        "timezone",
-        "slot_interval_minutes",
-        "min_notice_minutes",
-        "max_days_ahead",
-        "requires_approval",
-        "allow_customer_cancel",
-        "weekly_hours",
-        "exceptions",
-        "service_policy_overrides",
-        "legacy_calendar_ids",
-        "is_active",
-    }
 
-    filtered_data = {
-        key: value
-        for key, value in update_data.items()
-        if key in allowed_fields
-    }
+    if not update_data:
+        return get_or_create_booking_setting(organization_id)
 
-    if not filtered_data:
-        setting = get_or_create_booking_setting(organization_id)
-        return setting
+    try:
+        response = (
+            supabase
+            .table("booking_settings")
+            .update(update_data)
+            .eq("organization_id", organization_id)
+            .execute()
+        )
 
-    existing = get_booking_setting(organization_id)
+        if not response.data:
+            raise BookingSettingRepoError("Booking setting update failed")
 
-    if not existing:
-        create_default_booking_setting(organization_id)
+        return response.data[0]
 
-    result = (
-        supabase.table("booking_settings")
-        .update(filtered_data)
-        .eq("organization_id", organization_id)
-        .execute()
-    )
-
-    rows = result.data or []
-
-    if not rows:
-        raise BookingSettingRepoError("Failed to update booking setting")
-
-    return rows[0]
+    except Exception as e:
+        raise BookingSettingRepoError(str(e))

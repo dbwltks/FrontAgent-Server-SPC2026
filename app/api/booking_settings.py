@@ -26,28 +26,9 @@ class BookingSettingUpdateRequest(BaseModel):
     requires_approval: bool | None = Field(default=None, example=True)
     allow_customer_cancel: bool | None = Field(default=None, example=True)
 
-    weekly_hours: list[dict[str, Any]] | None = Field(
-        default=None,
-        example=[
-            {
-                "day_of_week": 1,
-                "start_time": "10:00",
-                "end_time": "18:00",
-                "is_active": True,
-            }
-        ],
-    )
-
-    exceptions: list[dict[str, Any]] | None = Field(
-        default=None,
-        example=[
-            {
-                "date": "2026-07-01",
-                "is_closed": True,
-                "reason": "휴무",
-            }
-        ],
-    )
+    weekly_hours: list[dict[str, Any]] | None = Field(default=None)
+    exceptions: list[dict[str, Any]] | None = Field(default=None)
+    service_policy_overrides: dict[str, Any] | None = Field(default=None)
 
     is_active: bool | None = Field(default=None, example=True)
 
@@ -78,24 +59,19 @@ def get_booking_setting_api(
 
 
 @router.patch("/booking-settings/{organization_id}")
-def update_booking_setting_api(
+def update_booking_settings(
     organization_id: str,
     request: BookingSettingUpdateRequest,
-) -> dict[str, Any]:
-    """
-    조직의 예약 설정을 수정합니다.
+):
+    update_data = request.model_dump(
+        exclude_unset=True,
+        exclude_none=True,
+    )
 
-    사장님이 관리자 화면에서 운영시간, 휴무일, 예약 정책을 수정할 때 사용합니다.
-    """
     try:
-        update_data = request.model_dump(exclude_unset=True)
-        setting = update_booking_setting(
+        return update_booking_setting(
             organization_id=organization_id,
             update_data=update_data,
         )
-        return {
-            "message": "예약 설정이 수정되었습니다.",
-            "booking_setting": setting,
-        }
-    except Exception as error:
-        _handle_booking_setting_error(error)
+    except BookingSettingRepoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
