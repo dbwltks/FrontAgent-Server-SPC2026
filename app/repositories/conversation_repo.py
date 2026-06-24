@@ -50,6 +50,29 @@ def get_or_create_conversation(
     return created.data[0]
 
 
+def get_conversation_by_session(
+    organization_id: str,
+    session_id: str,
+) -> dict | None:
+    """
+    organization_id + session_id 기준으로 상담방을 조회한다.
+
+    get_or_create_conversation과 달리 없으면 생성하지 않고 None을 반환한다.
+    위젯이 자신의 상담방 상태(관리자 메시지 등)를 polling으로 확인할 때 쓴다.
+    """
+
+    existing = (
+        supabase.table("conversations")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("session_id", session_id)
+        .limit(1)
+        .execute()
+    )
+
+    return existing.data[0] if existing.data else None
+
+
 def create_conversation_message(
     organization_id: str,
     conversation_id: str,

@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     knowledge_upload_max_bytes: int = 20 * 1024 * 1024
     knowledge_storage_bucket: str = "knowledge-originals"
 
+    clova_speech_api_url: str = ""
+    clova_speech_api_secret: str = ""
+    clova_speech_streaming_api_url: str = ""
+    clova_speech_streaming_api_secret: str = ""
+
     class Config:
         env_file = ".env"
 
