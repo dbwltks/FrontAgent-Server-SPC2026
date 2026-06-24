@@ -1,24 +1,22 @@
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Callable
-
-from supabase import create_client
-
-from app.core.config import settings
-
 from datetime import date, datetime, time, timedelta
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
+from supabase import create_client
+from app.core.config import settings
 
 from app.repositories.reservation_repo import (
     NotFoundError,
     ReservationConflictError,
     ReservationRepoError,
+    cancel_reservation as repo_cancel_reservation,
     create_reservation as repo_create_reservation,
     get_available_slots as repo_get_available_slots,
+    get_reservation as repo_get_reservation,
     get_service as repo_get_service,
+    list_reservations as repo_list_reservations,
     list_services as repo_list_services,
 )
-
 TaskFunctionHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
@@ -34,6 +32,33 @@ def get_supabase_client():
         settings.supabase_service_role_key,
     )
    
+def _read_path(source: dict[str, Any], key: str) -> Any:
+    """
+    dict에서 key 또는 dot path 값을 읽는다.
+    예:
+    - customer_phone
+    - lookup_result.reservations
+    """
+    if not isinstance(source, dict):
+        return None
+
+    if "." not in key:
+        return source.get(key)
+
+    current: Any = source
+
+    for part in key.split("."):
+        if not isinstance(current, dict):
+            return None
+
+        current = current.get(part)
+
+        if current is None:
+            return None
+
+    return current
+
+
 def _get_value(
     params: dict[str, Any],
     variables: dict[str, Any],
@@ -43,13 +68,14 @@ def _get_value(
     """
     Function Node params 값을 우선 사용하고,
     없으면 task memory variables에서 찾는다.
+    dot path도 지원한다.
     """
     for key in keys:
-        value = params.get(key)
+        value = _read_path(params, key)
         if value is not None and value != "":
             return value
 
-        value = variables.get(key)
+        value = _read_path(variables, key)
         if value is not None and value != "":
             return value
 
@@ -194,6 +220,119 @@ def _domain_error_result(error: Exception) -> dict[str, Any]:
         "error_code": "unknown_error",
         "message": str(error),
     }
+
+def _normalize_status_filter(value: Any) -> list[str] | None:
+    if value is None or value == "":
+        return None
+
+    if isinstance(value, str):
+        return [
+            item.strip()
+            for item in value.split(",")
+            if item.strip()
+        ]
+
+    if isinstance(value, (list, tuple, set)):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+
+    return [str(value).strip()]
+
+
+def _parse_positive_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+
+    try:
+        parsed = int(str(value).replace("번", "").strip())
+    except ValueError:
+        return None
+
+    if parsed <= 0:
+        return None
+
+    return parsed
+
+
+def _format_reservation_option(
+    reservation: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    return {
+        "number": index,
+        "reservation_id": reservation.get("id"),
+        "customer_name": reservation.get("customer_name"),
+        "customer_phone": reservation.get("customer_phone"),
+        "service_id": reservation.get("service_id"),
+        "calendar_id": reservation.get("calendar_id"),
+        "start_at": reservation.get("start_at"),
+        "end_at": reservation.get("end_at"),
+        "status": reservation.get("status"),
+        "label": (
+            f"{index}. {reservation.get('customer_name') or '고객'} / "
+            f"{reservation.get('start_at')} / "
+            f"상태: {reservation.get('status')}"
+        ),
+    }
+
+
+def _resolve_reservation_id_from_memory(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> str | None:
+    reservation_id = _get_value(
+        params,
+        variables,
+        "reservation_id",
+        "selected_reservation_id",
+    )
+
+    if reservation_id:
+        return str(reservation_id)
+
+    selected_number = _get_value(
+        params,
+        variables,
+        "selected_reservation_number",
+        "reservation_number",
+        "selected_number",
+        "selected_option_no",
+        "option_no",
+    )
+
+    parsed_number = _parse_positive_int(selected_number)
+
+    if not parsed_number:
+        return None
+
+    reservations = _get_value(
+        params,
+        variables,
+        "cancelable_reservations",
+        "reservations",
+        "lookup_result.cancelable_reservations",
+        "lookup_result.reservations",
+        "reservation_lookup_result.cancelable_reservations",
+        "reservation_lookup_result.reservations",
+    )
+
+    if not isinstance(reservations, list):
+        return None
+
+    index = parsed_number - 1
+
+    if index < 0 or index >= len(reservations):
+        return None
+
+    selected = reservations[index]
+
+    if not isinstance(selected, dict):
+        return None
+
+    return selected.get("id")
 
 
 def check_required_variables(
@@ -538,329 +677,222 @@ def reservation_create_reservation(
         )
         return result
 
-
-def lookup_cancelable_reservations(
+def reservation_list_reservations(
     params: dict[str, Any],
     variables: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    취소 가능한 예약 목록을 조회한다.
+    organization_id = _get_value(params, variables, "organization_id")
+    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    status_value = _get_value(params, variables, "status")
+    limit_value = _get_value(params, variables, "limit", default=10)
 
-    검색 기준:
-    - organization_id: 필수
-    - customer_name: 선택
-    - customer_phone: 선택
-    - reservation_id: 선택
-    - product_name: 선택
-
-    반환:
-    - count: 조회된 예약 수
-    - reservations: 취소 가능한 예약 목록
-    """
-
-    organization_id = (
-        params.get("organization_id")
-        or variables.get("organization_id")
-    )
-
-    customer_name = (
-        params.get("customer_name")
-        or variables.get("customer_name")
-        or variables.get("name")
-    )
-
-    customer_phone = (
-        params.get("customer_phone")
-        or variables.get("customer_phone")
-        or variables.get("phone")
-    )
-
-    reservation_id = (
-        params.get("reservation_id")
-        or variables.get("reservation_id")
-    )
-
-    product_name = (
-        params.get("product_name")
-        or variables.get("product_name")
-    )
+    missing_keys = []
 
     if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not customer_phone:
+        missing_keys.append("customer_phone")
+
+    if missing_keys:
         return {
             "ok": False,
-            "count": 0,
+            "found": False,
+            "has_reservations": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
             "reservations": [],
-            "message": "organization_id가 필요합니다.",
-            "error_code": "ORGANIZATION_ID_MISSING",
+            "reservation_options": [],
+            "count": 0,
         }
 
-    if not any([customer_name, customer_phone, reservation_id, product_name]):
+    try:
+        status_filter = _normalize_status_filter(status_value)
+        limit = _parse_positive_int(limit_value) or 10
+
+        filters = {
+            "organization_id": organization_id,
+            "customer_phone": customer_phone,
+            "limit": limit,
+        }
+
+        reservations = repo_list_reservations(filters)
+
+        if status_filter:
+            reservations = [
+                reservation
+                for reservation in reservations
+                if reservation.get("status") in status_filter
+            ]
+
+        reservation_options = [
+            _format_reservation_option(reservation, index)
+            for index, reservation in enumerate(reservations, start=1)
+        ]
+
         return {
-            "ok": False,
-            "count": 0,
-            "reservations": [],
-            "message": "예약 조회를 위해 이름, 전화번호, 예약 ID, 상품명 중 하나가 필요합니다.",
-            "error_code": "SEARCH_CONDITION_MISSING",
+            "ok": True,
+            "found": len(reservations) > 0,
+            "has_reservations": len(reservations) > 0,
+            "customer_phone": customer_phone,
+            "reservations": reservations,
+            "reservation_options": reservation_options,
+            "count": len(reservations),
         }
 
-    supabase = get_supabase_client()
-
-    query = (
-        supabase
-        .table("reservations")
-        .select(
-            "id, customer_name, customer_phone, product_name, "
-            "scheduled_start_at, scheduled_end_at, status"
-        )
-        .eq("organization_id", organization_id)
-        .in_("status", ["reserved", "confirmed"])
-        .order("scheduled_start_at")
-    )
-
-    if reservation_id:
-        query = query.eq("id", reservation_id)
-
-    if customer_name:
-        query = query.ilike("customer_name", f"%{customer_name}%")
-
-    if customer_phone:
-        query = query.eq("customer_phone", customer_phone)
-
-    if product_name:
-        query = query.ilike("product_name", f"%{product_name}%")
-
-    response = query.execute()
-
-    reservations = response.data or []
-
-    options = []
-    for index, reservation in enumerate(reservations, start=1):
-        options.append(
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
             {
-                "option_no": index,
-                "reservation_id": reservation.get("id"),
-                "product_name": reservation.get("product_name"),
-                "scheduled_start_at": reservation.get("scheduled_start_at"),
-                "scheduled_end_at": reservation.get("scheduled_end_at"),
-                "status": reservation.get("status"),
+                "found": False,
+                "has_reservations": False,
+                "reservations": [],
+                "reservation_options": [],
+                "count": 0,
             }
         )
+        return result
 
-    return {
-        "ok": True,
-        "count": len(reservations),
-        "reservations": reservations,
-        "options": options,
-        "message": build_cancelable_reservation_message(options),
-    }
 
-def cancel_reservation(
+def reservation_lookup_cancelable_reservations(
     params: dict[str, Any],
     variables: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    예약을 실제로 취소한다.
+    params_with_status = {
+        **params,
+        "status": params.get("status") or ["requested", "confirmed"],
+    }
 
-    입력 우선순위:
-    1. reservation_id
-    2. selected_reservation_id
-    3. selected_option_no + options
-
-    처리:
-    - reservations.status를 cancelled로 변경
-    - cancel_reason 저장
-    - cancelled_at 저장
-    """
-
-    organization_id = (
-        params.get("organization_id")
-        or variables.get("organization_id")
+    result = reservation_list_reservations(
+        params=params_with_status,
+        variables=variables,
     )
 
-    reservation_id = (
-        params.get("reservation_id")
-        or params.get("selected_reservation_id")
-        or variables.get("reservation_id")
-        or variables.get("selected_reservation_id")
+    reservations = result.get("reservations") or []
+
+    cancelable_reservations = [
+        reservation
+        for reservation in reservations
+        if reservation.get("status") in ["requested", "confirmed"]
+    ]
+
+    cancelable_options = [
+        _format_reservation_option(reservation, index)
+        for index, reservation in enumerate(cancelable_reservations, start=1)
+    ]
+
+    result.update(
+        {
+            "cancelable_reservations": cancelable_reservations,
+            "cancelable_options": cancelable_options,
+            "has_cancelable_reservations": len(cancelable_reservations) > 0,
+            "cancelable_count": len(cancelable_reservations),
+        }
     )
 
-    selected_option_no = (
-        params.get("selected_option_no")
-        or params.get("option_no")
-        or variables.get("selected_option_no")
-        or variables.get("option_no")
-    )
+    return result
 
-    options = (
-        params.get("options")
-        or variables.get("options")
-        or variables.get("cancel_options")
-        or []
-    )
 
-    cancel_reason = (
-        params.get("cancel_reason")
-        or variables.get("cancel_reason")
-        or "사용자 요청에 의한 예약 취소"
-    )
+def reservation_get_reservation(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    reservation_id = _resolve_reservation_id_from_memory(params, variables)
+
+    missing_keys = []
 
     if not organization_id:
-        return {
-            "ok": False,
-            "cancelled": False,
-            "message": "organization_id가 필요합니다.",
-            "error_code": "ORGANIZATION_ID_MISSING",
-        }
-
-    if not reservation_id and selected_option_no and options:
-        reservation_id = resolve_reservation_id_from_options(
-            selected_option_no=selected_option_no,
-            options=options,
-        )
+        missing_keys.append("organization_id")
 
     if not reservation_id:
+        missing_keys.append("reservation_id")
+
+    if missing_keys:
         return {
             "ok": False,
-            "cancelled": False,
-            "message": "취소할 예약을 찾기 위해 reservation_id 또는 선택 번호가 필요합니다.",
-            "error_code": "RESERVATION_ID_MISSING",
+            "found": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "reservation": None,
         }
 
-    supabase = get_supabase_client()
-
-    # 1. 취소 대상 예약 조회
-    lookup_response = (
-        supabase
-        .table("reservations")
-        .select(
-            "id, organization_id, customer_name, customer_phone, product_name, "
-            "scheduled_start_at, scheduled_end_at, status, google_calendar_event_id"
+    try:
+        reservation = repo_get_reservation(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
         )
-        .eq("id", reservation_id)
-        .eq("organization_id", organization_id)
-        .execute()
-    )
 
-    reservations = lookup_response.data or []
+        return {
+            "ok": True,
+            "found": True,
+            "reservation_id": reservation.get("id"),
+            "reservation": reservation,
+            "status": reservation.get("status"),
+        }
 
-    if not reservations:
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
+            {
+                "found": False,
+                "reservation": None,
+            }
+        )
+        return result
+
+
+def reservation_cancel_reservation(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    reservation_id = _resolve_reservation_id_from_memory(params, variables)
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not reservation_id:
+        missing_keys.append("reservation_id")
+
+    if missing_keys:
         return {
             "ok": False,
             "cancelled": False,
-            "reservation_id": reservation_id,
-            "message": "취소할 예약을 찾지 못했습니다.",
-            "error_code": "RESERVATION_NOT_FOUND",
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "reservation_id": None,
+            "reservation": None,
         }
 
-    reservation = reservations[0]
+    try:
+        reservation = repo_cancel_reservation(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
+        )
 
-    if reservation.get("status") == "cancelled":
         return {
             "ok": True,
             "cancelled": True,
-            "already_cancelled": True,
+            "reservation_id": reservation.get("id"),
+            "status": reservation.get("status"),
             "reservation": reservation,
-            "message": "이미 취소된 예약입니다.",
+            "message": "예약이 취소되었습니다.",
         }
 
-    if reservation.get("status") not in ["reserved", "confirmed"]:
-        return {
-            "ok": False,
-            "cancelled": False,
-            "reservation": reservation,
-            "message": f"현재 상태가 {reservation.get('status')}인 예약은 취소할 수 없습니다.",
-            "error_code": "RESERVATION_NOT_CANCELABLE",
-        }
-
-    now = datetime.now(timezone.utc).isoformat()
-
-    # 2. 예약 취소 처리
-    update_response = (
-        supabase
-        .table("reservations")
-        .update(
+    except Exception as error:
+        result = _domain_error_result(error)
+        result.update(
             {
-                "status": "cancelled",
-                "cancel_reason": cancel_reason,
-                "cancelled_at": now,
-                "updated_at": now,
+                "cancelled": False,
+                "reservation_id": reservation_id,
+                "reservation": None,
             }
         )
-        .eq("id", reservation_id)
-        .eq("organization_id", organization_id)
-        .execute()
-    )
+        return result
 
-    updated_reservations = update_response.data or []
-
-    if not updated_reservations:
-        return {
-            "ok": False,
-            "cancelled": False,
-            "reservation_id": reservation_id,
-            "message": "예약 취소 처리에 실패했습니다.",
-            "error_code": "RESERVATION_CANCEL_FAILED",
-        }
-
-    cancelled_reservation = updated_reservations[0]
-
-    return {
-        "ok": True,
-        "cancelled": True,
-        "already_cancelled": False,
-        "reservation_id": reservation_id,
-        "reservation": cancelled_reservation,
-        "message": (
-            f"{cancelled_reservation.get('product_name')} 예약이 취소되었습니다."
-        ),
-    }
-
-
-def resolve_reservation_id_from_options(
-    selected_option_no: Any,
-    options: list[dict[str, Any]],
-) -> str | None:
-    """
-    사용자가 '2번'처럼 선택했을 때 options에서 reservation_id를 찾는다.
-    """
-
-    try:
-        option_no = int(str(selected_option_no).replace("번", "").strip())
-    except ValueError:
-        return None
-
-    for option in options:
-        if option.get("option_no") == option_no:
-            return option.get("reservation_id")
-
-    return None
-
-
-
-def build_cancelable_reservation_message(
-    options: list[dict[str, Any]],
-) -> str:
-    if not options:
-        return "취소 가능한 예약을 찾지 못했습니다."
-
-    if len(options) == 1:
-        option = options[0]
-        return (
-            "취소 가능한 예약이 1건 있습니다.\n"
-            f"1. {option['product_name']} - {option['scheduled_start_at']}\n"
-            "이 예약을 취소할까요?"
-        )
-
-    lines = ["취소 가능한 예약이 여러 건 있습니다. 어떤 예약을 취소하시겠어요?"]
-
-    for option in options:
-        lines.append(
-            f"{option['option_no']}. "
-            f"{option['product_name']} - "
-            f"{option['scheduled_start_at']}"
-        )
-
-    return "\n".join(lines)
 
 
 FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
@@ -879,22 +911,45 @@ FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
         handler=create_reservation_request,
         description="예약 요청 정보를 생성한다.",
     ),
+    "reservation.list_reservations": RegisteredTaskFunction(
+        name="reservation.list_reservations",
+        handler=reservation_list_reservations,
+        description="고객 전화번호 기준으로 예약 목록을 조회한다.",
+    ),
+
+    "reservation.lookup_cancelable_reservations": RegisteredTaskFunction(
+        name="reservation.lookup_cancelable_reservations",
+        handler=reservation_lookup_cancelable_reservations,
+        description="고객 전화번호 기준으로 취소 가능한 예약 목록을 조회한다.",
+    ),
+
+    "reservation.get_reservation": RegisteredTaskFunction(
+        name="reservation.get_reservation",
+        handler=reservation_get_reservation,
+        description="예약 ID 또는 선택 번호 기준으로 예약 상세를 조회한다.",
+    ),
+
+    "reservation.cancel_reservation": RegisteredTaskFunction(
+        name="reservation.cancel_reservation",
+        handler=reservation_cancel_reservation,
+        description="예약 ID 또는 선택 번호 기준으로 예약을 취소한다.",
+    ),
+
     "lookup_cancelable_reservations": RegisteredTaskFunction(
         name="lookup_cancelable_reservations",
-        handler=lookup_cancelable_reservations,
-        description="취소 가능한 예약 목록을 조회한다.",
+        handler=reservation_lookup_cancelable_reservations,
+        description="취소 가능한 예약 목록을 조회한다. 기존 플로우 호환용 alias.",
     ),
     "cancel_reservation": RegisteredTaskFunction(
         name="cancel_reservation",
-        handler=cancel_reservation,
-        description="예약을 취소 상태로 변경한다.",
+        handler=reservation_cancel_reservation,
+        description="예약을 취소한다. 기존 플로우 호환용 alias.",
     ),
     "reservation.list_services": RegisteredTaskFunction(
         name="reservation.list_services",
         handler=reservation_list_services,
         description="예약 가능한 서비스 목록을 조회한다.",
     ),
-
     "reservation.get_available_slots": RegisteredTaskFunction(
         name="reservation.get_available_slots",
         handler=reservation_get_available_slots,
