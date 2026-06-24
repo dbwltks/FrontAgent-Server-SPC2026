@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from typing import Any
 
@@ -16,12 +17,17 @@ from app.repositories.reservation_repo import (
     get_available_slots,
     get_reservation,
     get_service,
-    list_booking_calendars,
     list_reservations,
     list_services,
     reject_reservation,
 )
+from app.services.reservation_calendar_sync_service import (
+    sync_cancelled_reservation_to_calendar,
+    sync_confirmed_reservation_to_calendar,
+)
 
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Reservations"])
 
@@ -35,12 +41,7 @@ class ReservationCreateRequest(BaseModel):
         default=None,
         examples=["00000000-0000-0000-0000-000000000000"],
     )
-
     service_id: str = Field(
-        ...,
-        examples=["00000000-0000-0000-0000-000000000000"],
-    )
-    calendar_id: str = Field(
         ...,
         examples=["00000000-0000-0000-0000-000000000000"],
     )
@@ -92,6 +93,64 @@ def _handle_repo_error(error: Exception) -> None:
     raise HTTPException(status_code=500, detail="Reservation API error")
 
 
+def _safe_sync_confirmed_reservation_to_calendar(
+    organization_id: str,
+    reservation_id: str,
+) -> dict[str, Any]:
+    """
+    예약 확정 후 Google Calendar 동기화를 시도한다.
+
+    Calendar sync 실패가 예약 확정 API 실패로 이어지면 안 된다.
+    """
+    try:
+        return sync_confirmed_reservation_to_calendar(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
+            access_token=None,
+        )
+    except Exception as error:
+        logger.warning(
+            "Failed to sync confirmed reservation to calendar: reservation_id=%s",
+            reservation_id,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "status": "failed",
+            "reservation_id": reservation_id,
+            "error_message": str(error),
+        }
+
+
+def _safe_sync_cancelled_reservation_to_calendar(
+    organization_id: str,
+    reservation_id: str,
+) -> dict[str, Any]:
+    """
+    예약 취소 후 Google Calendar 동기화를 시도한다.
+
+    Calendar sync 실패가 예약 취소 API 실패로 이어지면 안 된다.
+    """
+    try:
+        return sync_cancelled_reservation_to_calendar(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
+            access_token=None,
+        )
+    except Exception as error:
+        logger.warning(
+            "Failed to sync cancelled reservation to calendar: reservation_id=%s",
+            reservation_id,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "status": "failed",
+            "reservation_id": reservation_id,
+            "error_message": str(error),
+        }
+
+
 @router.get("/services")
 def list_services_api(
     organization_id: str = Query(
@@ -107,6 +166,7 @@ def list_services_api(
     """
     try:
         items = list_services(organization_id)
+
         return {
             "organization_id": organization_id,
             "count": len(items),
@@ -143,27 +203,6 @@ def get_service_api(
         _handle_repo_error(error)
 
 
-@router.get("/booking-calendars")
-def list_booking_calendars_api(
-    organization_id: str = Query(
-        ...,
-        examples=["00000000-0000-0000-0000-000000000000"],
-    ),
-) -> dict[str, Any]:
-    """
-    예약 캘린더 목록을 조회한다.
-    """
-    try:
-        items = list_booking_calendars(organization_id)
-        return {
-            "organization_id": organization_id,
-            "count": len(items),
-            "items": items,
-        }
-    except Exception as error:
-        _handle_repo_error(error)
-
-
 @router.get("/booking/available-slots")
 def get_available_slots_api(
     organization_id: str = Query(
@@ -179,10 +218,6 @@ def get_available_slots_api(
         alias="date",
         examples=["2026-07-01"],
     ),
-    calendar_id: str | None = Query(
-        default=None,
-        examples=["00000000-0000-0000-0000-000000000000"],
-    ),
 ) -> dict[str, Any]:
     """
     특정 서비스의 예약 가능한 시간 목록을 조회한다.
@@ -195,7 +230,6 @@ def get_available_slots_api(
             organization_id=organization_id,
             service_id=service_id,
             target_date=target_date,
-            calendar_id=calendar_id,
         )
     except Exception as error:
         _handle_repo_error(error)
@@ -218,7 +252,6 @@ def create_reservation_api(
             organization_id=request.organization_id,
             conversation_id=request.conversation_id,
             service_id=request.service_id,
-            calendar_id=request.calendar_id,
             customer_name=request.customer_name,
             customer_phone=request.customer_phone,
             customer_email=request.customer_email,
@@ -247,7 +280,6 @@ def list_reservations_api(
     ),
     status: str | None = Query(default=None, examples=["requested"]),
     service_id: str | None = Query(default=None),
-    calendar_id: str | None = Query(default=None),
     date_from: datetime | None = Query(
         default=None,
         examples=["2026-07-01T00:00:00+09:00"],
@@ -267,7 +299,6 @@ def list_reservations_api(
             organization_id=organization_id,
             status=status,
             service_id=service_id,
-            calendar_id=calendar_id,
             date_from=date_from,
             date_to=date_to,
             customer_phone=customer_phone,
@@ -322,10 +353,19 @@ def confirm_reservation_api(
     예약 요청을 확정한다.
 
     상태 변경:
-    requested -> confirmed
+    - requested -> confirmed
+
+    Calendar sync:
+    - confirmed 이후 Google Calendar 동기화를 시도한다.
+    - OAuth가 아직 없으면 pending/skipped로 남는다.
     """
     try:
         reservation = confirm_reservation(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
+        )
+
+        calendar_sync = _safe_sync_confirmed_reservation_to_calendar(
             organization_id=organization_id,
             reservation_id=reservation_id,
         )
@@ -335,6 +375,7 @@ def confirm_reservation_api(
             "status": reservation["status"],
             "message": "예약이 확정되었습니다.",
             "reservation": reservation,
+            "calendar_sync": calendar_sync,
         }
     except Exception as error:
         _handle_repo_error(error)
@@ -352,7 +393,7 @@ def reject_reservation_api(
     예약 요청을 거절한다.
 
     상태 변경:
-    requested -> rejected
+    - requested -> rejected
     """
     try:
         reservation = reject_reservation(
@@ -382,10 +423,19 @@ def cancel_reservation_api(
     예약을 취소한다.
 
     상태 변경:
-    requested/confirmed -> cancelled
+    - requested/confirmed -> cancelled
+
+    Calendar sync:
+    - cancelled 이후 Google Calendar 이벤트 취소/삭제 동기화를 시도한다.
+    - OAuth가 아직 없으면 pending/skipped로 남는다.
     """
     try:
         reservation = cancel_reservation(
+            organization_id=organization_id,
+            reservation_id=reservation_id,
+        )
+
+        calendar_sync = _safe_sync_cancelled_reservation_to_calendar(
             organization_id=organization_id,
             reservation_id=reservation_id,
         )
@@ -395,6 +445,7 @@ def cancel_reservation_api(
             "status": reservation["status"],
             "message": "예약이 취소되었습니다.",
             "reservation": reservation,
+            "calendar_sync": calendar_sync,
         }
     except Exception as error:
         _handle_repo_error(error)

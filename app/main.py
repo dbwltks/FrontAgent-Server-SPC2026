@@ -14,6 +14,7 @@ from app.api import (
     voice,
     organization_ai_settings,
     reservations,
+    booking_settings,
 )
 
 app = FastAPI(
@@ -51,6 +52,9 @@ app.include_router(conversations.router)
 
 # 태스크 플로우 테스트 API
 app.include_router(task_flows.router)
+
+# 예약 설정 API
+app.include_router(booking_settings.router)
 
 # 예약 도메인 API
 app.include_router(reservations.router)
