@@ -158,6 +158,14 @@ async def stream_chat_response(req: ChatRequest):
                             "elapsed_ms": elapsed_ms_since(started_at),
                         },
                     )
+                elif chunk.get("type") == "knowledge_start":
+                    yield sse_event(
+                        "knowledge_start",
+                        {
+                            "queries": chunk.get("queries", []),
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    )
                 continue
 
             # mode == "updates": {node_name: partial_state}

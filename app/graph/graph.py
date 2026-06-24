@@ -2,7 +2,6 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import RetryPolicy
 
 from app.graph.nodes.task_node import task_node
-from app.tasks.repository import TaskRepository
 from app.graph.state import AgentState
 from app.graph.nodes.conversation_node import conversation_node
 from app.graph.nodes.ai_handoff_node import ai_handoff_node
@@ -14,34 +13,19 @@ from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
 
-def has_active_task_session(state: AgentState) -> bool:
-    """
-    진행 중 task_session이 있으면 /chat의 현재 메시지를
-    일반 의도 판단 결과보다 태스크 입력으로 우선 처리한다.
-    """
-    try:
-        repository = TaskRepository()
-        active_session = repository.find_active_session(
-            organization_id=state["organization_id"],
-            session_id=state["session_id"],
-        )
-        return active_session is not None
-    except Exception:
-        return False
-
 def route_after_join(state: AgentState) -> str:
     """
-    conversation_node와 decision_node가 끝난 뒤 다음 노드를 결정한다.
+    conversation/decision/rule 병렬 브랜치가 끝난 뒤 다음 노드를 결정한다.
 
     우선순위:
     1. AI 자동응답 꺼짐 → ai_handoff
-    2. 진행 중 task_session 있음 → task
-    3. decision_node 결과에 따라 task / knowledge / rule
+    2. 진행 중 task_session 있음 → task (conversation_node가 미리 조회한 플래그)
+    3. decision_node 결과에 따라 task / knowledge / response
     """
     if not state.get("ai_enabled", True):
         return "ai_handoff"
 
-    if has_active_task_session(state):
+    if state.get("has_active_task", False):
         return "task"
 
     return route_after_decision(state)
@@ -50,6 +34,9 @@ def route_after_join(state: AgentState) -> str:
 def route_after_decision(state: AgentState) -> str:
     """
     decision_node가 결정한 next_action에 따라 다음 노드를 선택한다.
+
+    rules는 START에서 병렬로 이미 조회되므로 별도 rule 단계를 거치지 않고
+    knowledge 또는 곧바로 response로 분기한다.
     """
     next_action = state.get("next_action")
 
@@ -59,7 +46,7 @@ def route_after_decision(state: AgentState) -> str:
     if next_action == "search_knowledge":
         return "knowledge"
 
-    return "rule"
+    return "response"
 
 
 def join_after_conversation_and_decision(state: AgentState) -> AgentState:
@@ -108,13 +95,17 @@ def build_graph(checkpointer=None):
     graph.add_node("save_ai_message", save_ai_message_node)
     graph.add_node("save_agent_run", save_agent_run_node)
 
-    # conversation(DB 조회)과 decision(LLM 분류)을 동시에 시작한다.
-    # 둘 다 superstep 0에서 시작해 깊이가 같으므로 join은 정확히 한 번만 실행된다.
+    # conversation(DB 조회)·decision(LLM 분류)·rule(DB 조회)을 동시에 시작한다.
+    # rule은 org 단위 활성 규칙만 읽어 다른 노드 결과에 의존하지 않으므로,
+    # 응답 직전 직렬 단계로 두지 않고 여기서 병렬로 처리해 첫 토큰 지연을 줄인다.
+    # 셋 다 superstep 0에서 시작해 깊이가 같으므로 join은 정확히 한 번만 실행된다.
     graph.add_edge(START, "conversation")
     graph.add_edge(START, "decision")
+    graph.add_edge(START, "rule")
 
     graph.add_edge("conversation", "join")
     graph.add_edge("decision", "join")
+    graph.add_edge("rule", "join")
 
     # AI 자동응답이 꺼져 있으면 decision 결과를 버리고 종료, 아니면 decision 결과로 분기.
     graph.add_conditional_edges(
@@ -124,18 +115,15 @@ def build_graph(checkpointer=None):
             "ai_handoff": "ai_handoff",
             "task": "task",
             "knowledge": "knowledge",
-            "rule": "rule",
+            "response": "response",
         },
     )
     graph.add_edge("ai_handoff", END)
 
     graph.add_edge("task", "save_ai_message")
 
-    # Knowledge를 탄 경우에도 최종적으로 rule을 조회한다.
-    graph.add_edge("knowledge", "rule")
-
-    # rule은 최종 응답 생성 직전에 조회한다.
-    graph.add_edge("rule", "response")
+    # rules는 START에서 이미 병렬 조회됐으므로 knowledge 후 바로 응답으로 간다.
+    graph.add_edge("knowledge", "response")
 
     # 응답 저장 및 로그 저장
     graph.add_edge("response", "save_ai_message")
