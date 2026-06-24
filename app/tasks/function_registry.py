@@ -710,15 +710,21 @@ def reservation_list_reservations(
         status_filter = _normalize_status_filter(status_value)
         limit = _parse_positive_int(limit_value) or 10
 
-        filters = {
-            "organization_id": organization_id,
-            "customer_phone": customer_phone,
-            "limit": limit,
-        }
+        if status_filter and len(status_filter) == 1:
+            reservations = repo_list_reservations(
+                organization_id=organization_id,
+                customer_phone=customer_phone,
+                status=status_filter[0],
+                limit=limit,
+            )
+        else:
+            reservations = repo_list_reservations(
+                organization_id=organization_id,
+                customer_phone=customer_phone,
+                limit=limit,
+            )
 
-        reservations = repo_list_reservations(filters)
-
-        if status_filter:
+        if status_filter and len(status_filter) > 1:
             reservations = [
                 reservation
                 for reservation in reservations
