@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     voice_tts_voice: str = "marin"
     voice_upload_max_bytes: int = 10 * 1024 * 1024
 
+    # TTS provider 선택: "openai" | "elevenlabs". org 설정(voice_tts_provider)으로 덮어쓸 수 있다.
+    tts_provider: str = "openai"
+    elevenlabs_api_key: str = ""
+    # Flash v2.5: 저지연 + 다국어(한국어). 자연스러움 우선이면 eleven_multilingual_v2.
+    elevenlabs_model: str = "eleven_flash_v2_5"
+    # 한국어에 어울리는 보이스 ID를 ElevenLabs에서 골라 지정한다(미설정 시 합성 실패).
+    elevenlabs_voice_id: str = ""
+
     redis_url: str = "redis://localhost:6379"
 
     supabase_url: str

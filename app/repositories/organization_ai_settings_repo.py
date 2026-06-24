@@ -7,6 +7,7 @@ from app.core.db import supabase
 logger = logging.getLogger(__name__)
 
 ALLOWED_VOICE_MODES = {"pipeline", "realtime"}
+ALLOWED_TTS_PROVIDERS = {"openai", "elevenlabs"}
 ALLOWED_VOICE_RESPONSE_STYLES = {
     "friendly_short",
     "professional_short",
@@ -30,8 +31,11 @@ def default_ai_settings(organization_id: str) -> dict:
         "voice_enabled": True,
         "voice_mode": voice_mode if voice_mode in ALLOWED_VOICE_MODES else "pipeline",
         "voice_stt_model": settings.voice_stt_model,
+        "voice_tts_provider": settings.tts_provider,
         "voice_tts_model": settings.voice_tts_model,
         "voice_tts_voice": settings.voice_tts_voice,
+        "elevenlabs_model": settings.elevenlabs_model,
+        "elevenlabs_voice_id": settings.elevenlabs_voice_id or None,
         "realtime_model": settings.openai_realtime_model,
         "realtime_voice": settings.openai_realtime_voice,
         "voice_response_style": "friendly_short",
@@ -148,6 +152,16 @@ def validate_voice_mode(value: str | None) -> str | None:
     cleaned = value.strip().lower()
     if cleaned not in ALLOWED_VOICE_MODES:
         raise ValueError("voice_mode must be pipeline or realtime")
+    return cleaned
+
+
+def validate_tts_provider(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = value.strip().lower()
+    if cleaned not in ALLOWED_TTS_PROVIDERS:
+        raise ValueError("voice_tts_provider must be openai or elevenlabs")
     return cleaned
 
 

@@ -3,6 +3,8 @@ import logging
 import re
 import threading
 
+from langgraph.config import get_stream_writer
+
 from app.graph.state import AgentState
 from app.rag.retriever import retrieve_knowledge
 from app.repositories.knowledge_repo import increment_reference_counts
@@ -136,6 +138,14 @@ async def knowledge_node(state: AgentState) -> AgentState:
 
     generated_queries = state.get("knowledge_queries") or fallback_split_knowledge_queries(user_message)
     knowledge_queries = normalize_knowledge_queries(user_message, generated_queries)
+
+    writer = get_stream_writer()
+    writer(
+        {
+            "type": "knowledge_start",
+            "queries": knowledge_queries,
+        }
+    )
 
     # 질문 하나의 검색(임베딩 API/Supabase RPC) 실패가 다른 질문 결과까지 막지 않게 한다.
     results = await asyncio.gather(

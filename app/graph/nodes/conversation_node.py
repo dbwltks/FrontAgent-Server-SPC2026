@@ -7,9 +7,25 @@ from app.repositories.conversation_repo import (
     create_conversation_message,
     update_conversation_last_message,
 )
+from app.tasks.repository import TaskRepository
 
 
 logger = logging.getLogger(__name__)
+
+
+def _has_active_task_session(organization_id: str, session_id: str) -> bool:
+    """진행 중 task_session 여부. 라우팅에서 동기 DB 호출을 직렬로 하지 않도록
+    DB 작업을 이미 수행하는 이 병렬 노드에서 미리 조회해 state 플래그로 넘긴다."""
+    try:
+        return (
+            TaskRepository().find_active_session(
+                organization_id=organization_id,
+                session_id=session_id,
+            )
+            is not None
+        )
+    except Exception:
+        return False
 
 
 def conversation_node(state: AgentState) -> dict:
@@ -94,4 +110,5 @@ def conversation_node(state: AgentState) -> dict:
         "conversation_id": conversation_id,
         "ai_enabled": ai_enabled,
         "messages": [{"role": "user", "content": user_message}],
+        "has_active_task": _has_active_task_session(organization_id, session_id),
     }
