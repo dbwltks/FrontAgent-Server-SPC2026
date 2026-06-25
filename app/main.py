@@ -16,6 +16,8 @@ from app.api import (
     reservations,
     booking_settings,
     calendar,
+    products,
+    orders,
 )
 
 app = FastAPI(
@@ -62,3 +64,9 @@ app.include_router(reservations.router)
 
 # 자체 캘린더 조회 API
 app.include_router(calendar.router)
+
+# 상품 도메인 API
+app.include_router(products.router)
+
+# 상품 주문 도메인 API
+app.include_router(orders.router)
