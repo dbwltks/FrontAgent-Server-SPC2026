@@ -45,9 +45,11 @@ async def response_node(state: AgentState) -> AgentState:
         use_knowledge=state.get("use_knowledge", False),
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
+        task_result=state.get("task_result"),
         rules=rules,
         channel=state.get("channel", "web_chat"),
         voice_response_style=voice_response_style,
+        should_end_session=bool(state.get("should_end_session")),
     )
 
     writer = get_stream_writer()

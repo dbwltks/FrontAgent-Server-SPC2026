@@ -1,5 +1,5 @@
 from app.core.db import supabase
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 def utc_now_iso() -> str:
     """
@@ -275,6 +275,129 @@ def list_conversation_messages(
 
     result = query.order("created_at").limit(limit).execute()
     return result.data or []
+
+
+def close_idle_calls(idle_minutes: int) -> int:
+    """
+    web_call 채널에서 last_message_at 기준 idle_minutes 이상 응답이 없는
+    open 통화를 end_call_conversation과 동일하게 정리한다(닫은 개수 반환).
+    클라이언트가 /voice/call/end를 못 호출한 경우(강제 종료 등)의 안전망이다.
+    """
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=idle_minutes)
+    ).isoformat()
+
+    idle_rows = (
+        supabase.table("conversations")
+        .select("id, call_started_at")
+        .eq("channel", "web_call")
+        .eq("status", "open")
+        .lt("last_message_at", cutoff)
+        .execute()
+    ).data or []
+
+    if not idle_rows:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    closed_count = 0
+
+    for row in idle_rows:
+        update_payload = {
+            "status": "closed",
+            "updated_at": utc_now_iso(),
+        }
+
+        call_started_at = row.get("call_started_at")
+        if call_started_at:
+            started_at = datetime.fromisoformat(call_started_at)
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            update_payload["call_ended_at"] = now.isoformat()
+            update_payload["call_duration_seconds"] = max(
+                0, int((now - started_at).total_seconds())
+            )
+
+        result = (
+            supabase.table("conversations")
+            .update(update_payload)
+            .eq("id", row["id"])
+            .execute()
+        )
+        if result.data:
+            closed_count += 1
+
+    return closed_count
+
+
+WARNED_IDLE_MINUTES = 3
+WARNED_TO_CLOSE_SECONDS = 10
+IDLE_WARNING_MESSAGE = "아직 거기 계신가요? 잠시 더 기다려도 응답이 없으면 상담이 종료됩니다."
+IDLE_CLOSED_MESSAGE = "응답이 없어 상담이 종료되었습니다. 다시 문의하실 일이 있으면 새로 말씀해 주세요."
+
+
+def warn_or_close_idle_chats() -> None:
+    """
+    web_chat 상담방을 2단계로 정리한다.
+
+    1. last_message_at 기준 WARNED_IDLE_MINUTES 지났고 아직 안내한 적 없으면
+       안내 메시지를 남기고 idle_warned_at을 찍는다.
+    2. 안내한 뒤 WARNED_TO_CLOSE_SECONDS 더 지나도 응답이 없으면(=last_message_at이
+       안내 시점 이후로 갱신되지 않았으면) 종료 메시지를 남기고 closed로 바꾼다.
+    """
+
+    now = datetime.now(timezone.utc)
+    warn_cutoff = (now - timedelta(minutes=WARNED_IDLE_MINUTES)).isoformat()
+
+    open_conversations = (
+        supabase.table("conversations")
+        .select("id, organization_id, last_message_at, idle_warned_at")
+        .eq("channel", "web_chat")
+        .eq("status", "open")
+        .lt("last_message_at", warn_cutoff)
+        .execute()
+    ).data or []
+
+    for conversation in open_conversations:
+        idle_warned_at = conversation.get("idle_warned_at")
+
+        if not idle_warned_at:
+            create_conversation_message(
+                organization_id=conversation["organization_id"],
+                conversation_id=conversation["id"],
+                sender_type="system",
+                message=IDLE_WARNING_MESSAGE,
+            )
+            supabase.table("conversations").update(
+                {
+                    "idle_warned_at": now.isoformat(),
+                    "updated_at": utc_now_iso(),
+                }
+            ).eq("id", conversation["id"]).execute()
+            continue
+
+        warned_at = datetime.fromisoformat(idle_warned_at)
+        if warned_at.tzinfo is None:
+            warned_at = warned_at.replace(tzinfo=timezone.utc)
+
+        # 안내 이후 사용자가 다시 말했으면 last_message_at이 안내 시점보다
+        # 나중이므로 warn_cutoff 조건에 안 걸려 여기까지 오지 않는다.
+        if (now - warned_at).total_seconds() < WARNED_TO_CLOSE_SECONDS:
+            continue
+
+        create_conversation_message(
+            organization_id=conversation["organization_id"],
+            conversation_id=conversation["id"],
+            sender_type="system",
+            message=IDLE_CLOSED_MESSAGE,
+        )
+        supabase.table("conversations").update(
+            {
+                "status": "closed",
+                "updated_at": utc_now_iso(),
+            }
+        ).eq("id", conversation["id"]).execute()
 
 
 def close_conversation(

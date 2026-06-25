@@ -11,6 +11,7 @@ from app.repositories.ai_usage_repo import create_usage_log_background
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
     AI_DISABLED_MESSAGE,
+    build_session_end_payload,
     elapsed_ms_since,
     sse_event,
     stream_agent_graph_events,
@@ -142,7 +143,7 @@ async def stream_pipeline_voice_turn_events(
         tts_buffer = ""
         audio_index = 0
         total_audio_bytes = 0
-        audio_queue: asyncio.Queue[str] = asyncio.Queue()
+        audio_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         tts_semaphore = asyncio.Semaphore(TTS_MAX_CONCURRENCY)
 
         async def synth_worker(index: int, segment_text: str) -> None:
@@ -159,14 +160,17 @@ async def stream_pipeline_voice_turn_events(
 
             total_audio_bytes += len(chunk_audio)
             await audio_queue.put(
-                sse_event(
-                    "audio",
-                    {
-                        "content_type": TTS_CONTENT_TYPE,
-                        "audio_base64": base64.b64encode(chunk_audio).decode("ascii"),
-                        "index": index,
-                        "elapsed_ms": elapsed_ms_since(started_at),
-                    },
+                (
+                    index,
+                    sse_event(
+                        "audio",
+                        {
+                            "content_type": TTS_CONTENT_TYPE,
+                            "audio_base64": base64.b64encode(chunk_audio).decode("ascii"),
+                            "index": index,
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    ),
                 )
             )
 
@@ -178,13 +182,22 @@ async def stream_pipeline_voice_turn_events(
             audio_index += 1
             tts_tasks.append(asyncio.create_task(synth_worker(index, segment_text)))
 
+        pending_audio_events: dict[int, str] = {}
+        next_audio_index_to_emit = 0
+
         def drain_ready_audio() -> list[str]:
+            nonlocal next_audio_index_to_emit
             ready: list[str] = []
             while True:
                 try:
-                    ready.append(audio_queue.get_nowait())
+                    index, event = audio_queue.get_nowait()
+                    pending_audio_events[index] = event
                 except asyncio.QueueEmpty:
                     break
+
+            while next_audio_index_to_emit in pending_audio_events:
+                ready.append(pending_audio_events.pop(next_audio_index_to_emit))
+                next_audio_index_to_emit += 1
             return ready
 
         pending_conversation_messages: list[str] = []
@@ -295,6 +308,31 @@ async def stream_pipeline_voice_turn_events(
                 "elapsed_ms": elapsed_ms_since(started_at),
             },
         )
+
+        should_end_session = bool(final_state.get("should_end_session"))
+        if should_end_session:
+            yield sse_event(
+                "session_end",
+                build_session_end_payload(
+                    organization_id=organization_id,
+                    session_id=session_id,
+                    conversation_id=final_state.get("conversation_id"),
+                    channel="web_call",
+                    started_at=started_at,
+                ),
+            )
+            # web_call 프론트 호환: session_end와 동일 시점에 call_end도 보낸다.
+            yield sse_event(
+                "call_end",
+                build_session_end_payload(
+                    organization_id=organization_id,
+                    session_id=session_id,
+                    conversation_id=final_state.get("conversation_id"),
+                    channel="web_call",
+                    started_at=started_at,
+                ),
+            )
+
         create_usage_log_background(
             {
                 "organization_id": organization_id,
@@ -331,6 +369,9 @@ async def stream_pipeline_voice_turn_events(
                 "applied_rules": final_state.get("applied_rules", []),
                 "used_knowledge": final_state.get("used_knowledge", []),
                 "knowledge_context": final_state.get("knowledge_context", []),
+                "should_end_session": should_end_session,
+                "end_session": should_end_session,
+                "end_call": should_end_session,
                 "elapsed_ms": elapsed_ms_since(started_at),
             },
         )

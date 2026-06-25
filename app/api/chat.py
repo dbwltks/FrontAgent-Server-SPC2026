@@ -10,6 +10,7 @@ from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
     AI_DISABLED_MESSAGE,
+    build_session_end_payload,
     build_trace_detail,  # noqa: F401 (재노출, 기존 테스트 호환용)
     elapsed_ms_since,
     sse_event,
@@ -52,6 +53,9 @@ class ChatResponse(BaseModel):
     applied_rules: list[str]
     used_knowledge: list[dict]
     knowledge_context: list[dict]
+
+    # 상담 종료 신호 (채팅·통화 공통)
+    end_session: bool = False
 
 
 async def stream_chat_response(req: ChatRequest):
@@ -114,9 +118,36 @@ async def stream_chat_response(req: ChatRequest):
                 "applied_rules": final_state.get("applied_rules", []),
                 "used_knowledge": final_state.get("used_knowledge", []),
                 "knowledge_context": final_state.get("knowledge_context", []),
+                "should_end_session": bool(final_state.get("should_end_session")),
+                "end_session": bool(final_state.get("should_end_session")),
+                "end_call": bool(final_state.get("should_end_session")),
                 "elapsed_ms": elapsed_ms_since(started_at),
             },
         )
+
+        if final_state.get("should_end_session"):
+            yield sse_event(
+                "session_end",
+                build_session_end_payload(
+                    organization_id=req.organization_id,
+                    session_id=req.session_id,
+                    conversation_id=final_state.get("conversation_id"),
+                    channel=req.channel,
+                    started_at=started_at,
+                ),
+            )
+            if req.channel in ("web_call", "voice"):
+                yield sse_event(
+                    "call_end",
+                    build_session_end_payload(
+                        organization_id=req.organization_id,
+                        session_id=req.session_id,
+                        conversation_id=final_state.get("conversation_id"),
+                        channel=req.channel,
+                        started_at=started_at,
+                    ),
+                )
+
         yield sse_event("done", {"elapsed_ms": elapsed_ms_since(started_at)})
 
     except Exception:
@@ -182,6 +213,8 @@ async def chat(req: ChatRequest):
             applied_rules=result.get("applied_rules", []),
             used_knowledge=result.get("used_knowledge", []),
             knowledge_context=result.get("knowledge_context", []),
+
+            end_session=bool(result.get("should_end_session")),
         )
 
     except Exception:

@@ -17,11 +17,50 @@ NODE_TRACE_LABELS = {
 
 
 def sse_event(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
 def elapsed_ms_since(started_at: float) -> int:
     return int((time.perf_counter() - started_at) * 1000)
+
+
+def build_session_end_payload(
+    *,
+    organization_id: str,
+    session_id: str,
+    conversation_id: str | None,
+    channel: str,
+    started_at: float,
+    reason: str = "user_requested",
+) -> dict:
+    return {
+        "reason": reason,
+        "organization_id": organization_id,
+        "session_id": session_id,
+        "conversation_id": conversation_id,
+        "channel": channel,
+        "elapsed_ms": elapsed_ms_since(started_at),
+    }
+
+
+def build_call_end_payload(
+    *,
+    organization_id: str,
+    session_id: str,
+    conversation_id: str | None,
+    started_at: float,
+    reason: str = "user_requested",
+    channel: str = "web_call",
+) -> dict:
+    """web_call/realtime 호환용. session_end와 동일 payload에 channel을 포함한다."""
+    return build_session_end_payload(
+        organization_id=organization_id,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        channel=channel,
+        started_at=started_at,
+        reason=reason,
+    )
 
 
 def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
@@ -139,6 +178,9 @@ async def stream_agent_graph_events(
 
         # mode == "updates": {node_name: partial_state}
         for node_name, node_state in chunk.items():
+            if not isinstance(node_state, dict):
+                continue
+
             final_state.update(node_state)
 
             if on_node_update:
