@@ -1,3 +1,4 @@
+import time
 from typing import Any
 
 from supabase import Client, create_client
@@ -10,6 +11,18 @@ ACTIVE_TASK_STATUSES = [
     "waiting_user_input",
     "approval_waiting",
 ]
+
+# task_flows는 관리자가 가끔 수정하는 정적 메타데이터다(organization 설정과 동급).
+# task_node 실행 경로(매 대화 턴)에서 매번 DB를 왕복하지 않도록 짧은 TTL로
+# 캐싱하고, app/api/task_flows.py에서 플로우 메타데이터를 수정/삭제/생성하면
+# 해당 organization 전체를 무효화한다.
+_ENABLED_FLOW_CACHE_TTL_SECONDS = 60
+_enabled_flow_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+
+
+def invalidate_enabled_flow_cache(organization_id: str) -> None:
+    for key in [key for key in _enabled_flow_cache if key[0] == organization_id]:
+        _enabled_flow_cache.pop(key, None)
 
 
 class TaskRepository:
@@ -30,6 +43,22 @@ class TaskRepository:
         1순위: trigger_intent = task_type
         2순위: 기존 데모 플로우 이름 fallback
         """
+        cache_key = (organization_id, task_type)
+        cached = _enabled_flow_cache.get(cache_key)
+        now = time.monotonic()
+
+        if cached is not None and now - cached[0] < _ENABLED_FLOW_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        flow = self._find_enabled_flow_for_task_type_uncached(organization_id, task_type)
+        _enabled_flow_cache[cache_key] = (now, flow)
+        return flow
+
+    def _find_enabled_flow_for_task_type_uncached(
+        self,
+        organization_id: str,
+        task_type: str,
+    ) -> dict[str, Any] | None:
         response = (
             self.client.table("task_flows")
             .select("*")

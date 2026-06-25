@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 from typing import Literal
@@ -8,22 +7,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.services.agent_stream import (
+    AGENT_ERROR_MESSAGE,
+    AI_DISABLED_MESSAGE,
+    build_trace_detail,  # noqa: F401 (재노출, 기존 테스트 호환용)
+    elapsed_ms_since,
+    sse_event,
+    stream_agent_graph_events,
+)
 
 
 router = APIRouter(tags=["Chat"])
 logger = logging.getLogger(__name__)
-AI_DISABLED_MESSAGE = "AI 자동응답이 꺼져 있어 관리자 응답을 기다립니다."
-AGENT_ERROR_MESSAGE = "Agent response failed"
-
-# LangGraph stream_mode="updates"가 알려주는 노드 완료 이벤트를 SSE trace 이벤트로 변환한다.
-NODE_TRACE_LABELS = {
-    "conversation": "대화 세션 확인 완료",
-    "decision": "의도 분석 완료",
-    "task": "태스크 실행 완료",
-    "knowledge": "지식 검색 완료",
-    "rule": "규칙 평가 완료",
-    "response": "응답 생성 완료",
-}
 
 
 class ChatRequest(BaseModel):
@@ -59,66 +54,6 @@ class ChatResponse(BaseModel):
     knowledge_context: list[dict]
 
 
-def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
-    if node_name == "decision":
-        detail = (
-            f"intent={node_state.get('intent')} / "
-            f"next_action={node_state.get('next_action')} / "
-            f"task_type={node_state.get('task_type')}"
-        )
-        return detail, [node_state.get("decision_reason", "")]
-
-    if node_name == "task":
-        task_result = node_state.get("task_result") or {}
-        task_trace = task_result.get("trace") or []
-
-        return (
-            f"status={task_result.get('status')} / "
-            f"current_node={task_result.get('current_node_key')} / "
-            f"steps={len(task_trace)}",
-            task_trace,
-        )
-
-    if node_name == "knowledge":
-        groups = node_state.get("knowledge_context_groups", [])
-        sources = [k.get("source_title", "") for k in node_state.get("used_knowledge", [])]
-        items = [
-            {
-                "query": g.get("query"),
-                "chunks": [
-                    {
-                        "source_title": c.get("source_title"),
-                        "similarity": c.get("similarity"),
-                    }
-                    for c in g.get("chunks", [])
-                ],
-            }
-            for g in groups
-        ]
-        return f"{len(node_state.get('knowledge_queries', []))}개 질문 / {len(sources)}개 문서 참조", items
-
-    if node_name == "rule":
-        rules = node_state.get("rules", [])
-        items = [
-            {
-                "name": r.get("name", "unnamed"),
-                "instruction": r.get("instruction", ""),
-            }
-            for r in rules
-        ]
-        return f"활성 규칙 {len(rules)}개를 응답 지시문에 반영", items
-
-    return "", []
-
-
-def sse_event(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-
-
-def elapsed_ms_since(started_at: float) -> int:
-    return int((time.perf_counter() - started_at) * 1000)
-
-
 async def stream_chat_response(req: ChatRequest):
     """
     그래프를 LangGraph 네이티브 스트리밍(astream)으로 실행하며
@@ -136,77 +71,19 @@ async def stream_chat_response(req: ChatRequest):
     config = graph_config_for(req.organization_id, req.session_id)
 
     final_state: dict = {}
-    response_started = False
     started_at = time.perf_counter()
 
     try:
-        async for mode, chunk in agent_graph.astream(
-            initial_state,
+        async for event, data in stream_agent_graph_events(
+            agent_graph=agent_graph,
+            initial_state=initial_state,
             config=config,
-            stream_mode=["custom", "updates"],
+            started_at=started_at,
         ):
-            if mode == "custom":
-                if chunk.get("type") == "ai_response_delta":
-                    if not response_started:
-                        yield sse_event(
-                            "response_start",
-                            {"elapsed_ms": elapsed_ms_since(started_at)},
-                        )
-                        response_started = True
-
-                    yield sse_event(
-                        "delta",
-                        {
-                            "delta": chunk["delta"],
-                            "elapsed_ms": elapsed_ms_since(started_at),
-                        },
-                    )
-                elif chunk.get("type") == "knowledge_start":
-                    yield sse_event(
-                        "knowledge_start",
-                        {
-                            "queries": chunk.get("queries", []),
-                            "elapsed_ms": elapsed_ms_since(started_at),
-                        },
-                    )
-                elif chunk.get("type") == "task_step":
-                    step = chunk.get("step") or {}
-                    label = step.get("node_label") or step.get("node_key") or "태스크 단계"
-                    yield sse_event(
-                        "trace",
-                        {
-                            "step": "task",
-                            "status": "step",
-                            "detail": (
-                                f"{label} / "
-                                f"type={step.get('node_type')} / "
-                                f"next={step.get('next_behavior')}"
-                            ),
-                            "items": [step],
-                            "elapsed_ms": elapsed_ms_since(started_at),
-                        },
-                    )
+            if event == "final_state":
+                final_state = data
                 continue
-
-            # mode == "updates": {node_name: partial_state}
-            for node_name, node_state in chunk.items():
-                final_state.update(node_state)
-
-                label = NODE_TRACE_LABELS.get(node_name)
-                if not label:
-                    continue
-
-                detail, items = build_trace_detail(node_name, node_state)
-                yield sse_event(
-                    "trace",
-                    {
-                        "step": node_name,
-                        "status": "done",
-                        "detail": detail or label,
-                        "items": items,
-                        "elapsed_ms": elapsed_ms_since(started_at),
-                    },
-                )
+            yield sse_event(event, data)
 
         if not final_state.get("ai_enabled", True):
             yield sse_event(
@@ -231,10 +108,8 @@ async def stream_chat_response(req: ChatRequest):
                 "use_knowledge": final_state.get("use_knowledge", False),
                 "decision_reason": final_state.get("decision_reason"),
                 "conversation_id": final_state.get("conversation_id"),
-                
                 "task_status": final_state.get("task_status"),
                 "task_result": final_state.get("task_result"),
-                
                 "message": final_state.get("final_response") or AI_DISABLED_MESSAGE,
                 "applied_rules": final_state.get("applied_rules", []),
                 "used_knowledge": final_state.get("used_knowledge", []),
