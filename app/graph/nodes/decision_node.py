@@ -4,6 +4,7 @@ from typing import Literal
 from langchain_core.runnables import RunnableLambda
 from pydantic import BaseModel, Field
 
+from app.graph.session_end_detection import is_obvious_end_session_request
 from app.graph.state import AgentState
 from app.graph.message_utils import history_from_state_messages
 from app.graph.nodes.knowledge_node import (
@@ -25,8 +26,10 @@ class DecisionResult(BaseModel):
     모델이 이 스키마를 어길 수 없으므로 JSON 파싱 실패 자체가 일어나지 않는다.
     """
 
-    intent: Literal["pricing", "reservation", "handoff", "faq", "general"]
-    next_action: Literal["search_knowledge", "run_task", "handoff", "respond_general"]
+    intent: Literal["pricing", "reservation", "handoff", "faq", "general", "end_session"]
+    next_action: Literal[
+        "search_knowledge", "run_task", "handoff", "respond_general", "end_session"
+    ]
     task_type: Literal[
         "reservation_create",
         "reservation_lookup",
@@ -46,6 +49,7 @@ DECISION_INSTRUCTIONS = f"""
 - 정보 문의(가격·정책·안내·서비스 차이 등) → search_knowledge, use_knowledge:true, task_type:none
 - 예약 실행 요청 → run_task, use_knowledge:false (create/lookup/cancel/update 구분)
 - 상담사·직원 연결 → handoff, use_knowledge:false
+- 상담·대화·통화 종료 요청("끊어줘", "통화 종료", "채팅 그만", "여기까지", "그만할게요" 등) → end_session, use_knowledge:false, task_type:none
 - 인사·잡담 → respond_general, use_knowledge:false
 - 애매하면 search_knowledge 선택
 
@@ -96,6 +100,30 @@ FALLBACK_DECISION = DecisionResult(
     knowledge_queries=[],
 )
 
+END_SESSION_DECISION = DecisionResult(
+    intent="end_session",
+    next_action="end_session",
+    task_type="none",
+    use_knowledge=False,
+    knowledge_queries=[],
+)
+
+
+def _decision_update(decision: DecisionResult) -> dict:
+    should_end_session = (
+        decision.intent == "end_session" or decision.next_action == "end_session"
+    )
+    return {
+        "intent": decision.intent,
+        "next_action": decision.next_action,
+        "task_type": decision.task_type,
+        "use_knowledge": decision.use_knowledge,
+        "knowledge_queries": decision.knowledge_queries,
+        "should_use_knowledge": decision.use_knowledge,
+        "should_end_session": should_end_session,
+    }
+
+
 async def decision_node(state: AgentState) -> dict:
     """
     intent 분류용 LLM 호출이 실패(타임아웃, rate limit 등)해도
@@ -110,6 +138,9 @@ async def decision_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     organization_id = state["organization_id"]
 
+    if is_obvious_end_session_request(user_message):
+        return _decision_update(END_SESSION_DECISION)
+
     try:
         decision = await generate_structured(
             organization_id=organization_id,
@@ -123,15 +154,7 @@ async def decision_node(state: AgentState) -> dict:
         logger.warning("decision_node LLM call failed, falling back to general response", exc_info=True)
         decision = FALLBACK_DECISION
 
-    update: dict = {
-        "intent": decision.intent,
-        "next_action": decision.next_action,
-        "task_type": decision.task_type,
-        "use_knowledge": decision.use_knowledge,
-        "knowledge_queries": decision.knowledge_queries,
-        # 기존 should_use_knowledge_node와의 호환용
-        "should_use_knowledge": decision.use_knowledge,
-    }
+    update = _decision_update(decision)
 
     # 예약 진행 상태는 messages 히스토리로 표현되지 않으므로 checkpointer가
     # 영속화하는 구조화된 필드(active_task/task_step)에 별도로 유지한다.

@@ -1,13 +1,36 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.core.config import settings
 from app.graph.graph import build_graph
+from app.repositories.conversation_repo import close_idle_calls, warn_or_close_idle_chats
 
+
+logger = logging.getLogger(__name__)
 
 _checkpointer_cm = None
 agent_graph = None
+
+_IDLE_SWEEP_INTERVAL_SECONDS = 10
+_IDLE_CALL_MINUTES = 1
+
+
+async def _sweep_idle_conversations() -> None:
+    """
+    채팅 무응답 안내/종료, 통화 무응답 종료(클라이언트가 /voice/call/end를
+    못 호출한 경우의 안전망)를 주기적으로 처리한다.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(warn_or_close_idle_chats)
+            await asyncio.to_thread(close_idle_calls, _IDLE_CALL_MINUTES)
+        except Exception:
+            logger.exception("idle conversation sweep failed")
+
+        await asyncio.sleep(_IDLE_SWEEP_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
@@ -16,6 +39,7 @@ async def lifespan_graph(_app=None):
     FastAPI lifespan에서 사용한다.
     AsyncPostgresSaver 커넥션 풀을 앱 생명주기 동안 열어두고,
     그 checkpointer로 컴파일된 agent_graph를 모듈 전역에 노출한다.
+    동시에 무응답 상담방/통화를 정리하는 백그라운드 루프를 띄운다.
     """
     global _checkpointer_cm, agent_graph
 
@@ -24,10 +48,12 @@ async def lifespan_graph(_app=None):
     await checkpointer.setup()
 
     agent_graph = build_graph(checkpointer=checkpointer)
+    sweep_task = asyncio.create_task(_sweep_idle_conversations())
 
     try:
         yield
     finally:
+        sweep_task.cancel()
         await _checkpointer_cm.__aexit__(None, None, None)
         agent_graph = None
 
@@ -77,6 +103,7 @@ def build_initial_state(
         "task_type": None,
         "use_knowledge": False,
         "decision_reason": None,
+        "should_end_session": False,
         "task_result": None,
 
         # 기존 should_use_knowledge_node와의 호환용
