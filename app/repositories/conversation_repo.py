@@ -34,20 +34,68 @@ def get_or_create_conversation(
         return existing.data[0]
 
     # 2. 없으면 새 상담방 생성
+    insert_payload = {
+        "organization_id": organization_id,
+        "session_id": session_id,
+        "channel": channel,
+        "status": "open",
+    }
+
+    # 통화 채널은 첫 생성 시점을 통화 시작 시각으로 기록한다.
+    if channel == "web_call":
+        insert_payload["call_started_at"] = utc_now_iso()
+
     created = (
         supabase.table("conversations")
-        .insert(
-            {
-                "organization_id": organization_id,
-                "session_id": session_id,
-                "channel": channel,
-                "status": "open",
-            }
-        )
+        .insert(insert_payload)
         .execute()
     )
 
     return created.data[0]
+
+
+def end_call_conversation(
+    organization_id: str,
+    session_id: str,
+) -> dict | None:
+    """
+    통화가 끝났을 때 call_ended_at/call_duration_seconds를 기록한다.
+    call_started_at이 없으면(통화 채널이 아니었거나 이미 기록된 적 없으면) 손대지 않는다.
+    """
+
+    conversation = get_conversation_by_session(
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+
+    if not conversation or not conversation.get("call_started_at"):
+        return conversation
+
+    if conversation.get("call_ended_at"):
+        return conversation
+
+    ended_at = datetime.now(timezone.utc)
+    started_at = datetime.fromisoformat(conversation["call_started_at"])
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+
+    duration_seconds = max(0, int((ended_at - started_at).total_seconds()))
+
+    updated = (
+        supabase.table("conversations")
+        .update(
+            {
+                "call_ended_at": ended_at.isoformat(),
+                "call_duration_seconds": duration_seconds,
+                "status": "closed",
+            }
+        )
+        .eq("organization_id", organization_id)
+        .eq("session_id", session_id)
+        .execute()
+    )
+
+    return updated.data[0] if updated.data else None
 
 
 def get_conversation_by_session(
@@ -146,12 +194,14 @@ def update_conversation_last_message(
 def list_conversations(
     organization_id: str,
     status: str | None = None,
+    channel: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """
     관리자 화면에서 상담방 목록을 조회한다.
 
-    status를 넘기면 open/closed 등 특정 상태만 조회한다.
+    status를 넘기면 open/closed 등 특정 상태만, channel을 넘기면
+    web_chat/web_call 등 특정 채널만 조회한다.
     """
 
     query = (
@@ -164,6 +214,9 @@ def list_conversations(
 
     if status:
         query = query.eq("status", status)
+
+    if channel:
+        query = query.eq("channel", channel)
 
     result = query.execute()
 
