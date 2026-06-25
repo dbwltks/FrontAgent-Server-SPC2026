@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.repositories.calendar_view_repo import list_calendar_events
-
+from app.repositories.calendar_view_repo import (
+    get_calendar_day_view,
+    list_calendar_events,
+)
 
 router = APIRouter(tags=["Calendar"])
 
@@ -63,4 +65,51 @@ def list_calendar_events_api(
         raise HTTPException(
             status_code=500,
             detail="Calendar events API error",
+        )
+    
+
+@router.get("/calendar/day")
+def get_calendar_day_api(
+    organization_id: str = Query(
+        ...,
+        examples=["00000000-0000-0000-0000-000000000000"],
+    ),
+    target_date: date = Query(
+        ...,
+        examples=["2026-07-02"],
+    ),
+    timezone: str = Query(
+        default="Asia/Seoul",
+        examples=["Asia/Seoul"],
+    ),
+    service_id: str | None = Query(
+        default=None,
+        examples=["00000000-0000-0000-0000-000000000000"],
+    ),
+    status: str | None = Query(
+        default=None,
+        examples=["confirmed"],
+    ),
+) -> dict[str, Any]:
+    """
+    하루 캘린더 화면용 데이터를 조회한다.
+
+    service_id가 있으면 예약 가능 슬롯까지 함께 반환한다.
+    service_id가 없으면 해당 날짜의 예약 목록만 반환한다.
+    """
+
+    try:
+        return get_calendar_day_view(
+            organization_id=organization_id,
+            target_date=target_date,
+            timezone=timezone,
+            service_id=service_id,
+            status=status,
+        )
+
+    except Exception as error:
+        print("Calendar day API ERROR:", type(error).__name__, str(error))
+        raise HTTPException(
+            status_code=500,
+            detail="Calendar day API error",
         )
