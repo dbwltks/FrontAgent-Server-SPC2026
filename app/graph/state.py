@@ -31,12 +31,15 @@ class AgentState(TypedDict):
     task_step: Optional[str]
 
     # Decision Node에서 분류한 intent
-    # 예: pricing, reservation, handoff, faq, general
+    # 예: pricing, reservation, handoff, faq, general, end_session
     intent: Optional[str]
 
     # Decision Node에서 결정한 다음 행동
-    # 예: search_knowledge, run_task, handoff, respond_general
+    # 예: search_knowledge, run_task, handoff, respond_general, end_session
     next_action: Optional[str]
+
+    # 상담 종료 의도(채팅·통화 공통). session_end 신호·DB closed 기록에 사용.
+    should_end_session: bool
 
     # 실행할 태스크 종류
     # 예: reservation_create, reservation_lookup, reservation_cancel, none

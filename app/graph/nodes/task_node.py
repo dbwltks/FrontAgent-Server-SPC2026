@@ -68,7 +68,6 @@ async def task_node(state: AgentState) -> dict:
                 "task_result": task_result,
                 "task_handled": False,
                 "task_status": "failed",
-                "final_response": "실행할 태스크를 찾지 못했습니다.",
             }
 
         flow = repository.find_enabled_flow_for_task_type(
@@ -91,7 +90,6 @@ async def task_node(state: AgentState) -> dict:
                 "task_result": task_result,
                 "task_handled": False,
                 "task_status": "failed",
-                "final_response": "현재 실행할 수 있는 예약 태스크를 찾지 못했습니다.",
             }
 
         flow_id = flow["id"]
@@ -115,6 +113,5 @@ async def task_node(state: AgentState) -> dict:
         "task_result": task_result,
         "task_handled": bool(task_result.get("handled")),
         "task_status": task_result.get("status"),
-        "final_response": task_result.get("message") or "태스크가 처리되었습니다.",
         "session_state": task_result.get("variables") or {},
     }

@@ -58,12 +58,37 @@ def build_knowledge_groups_text(knowledge_context_groups: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def build_task_context_text(active_task: str | None, task_step: str | None) -> str:
-    """메시지 히스토리로 표현되지 않는 진행 중 Task 상태를 만든다."""
-    if not active_task:
-        return "진행 중인 Task가 없습니다."
+def build_task_context_text(
+    active_task: str | None,
+    task_step: str | None,
+    task_result: dict | None = None,
+) -> str:
+    """메시지 히스토리로 표현되지 않는 진행 중/완료 Task 상태를 만든다."""
+    lines: list[str] = []
 
-    return f"진행 중인 Task: {active_task}\n현재 단계: {task_step or '미정'}"
+    if active_task:
+        lines.append(f"진행 중인 Task: {active_task}\n현재 단계: {task_step or '미정'}")
+    else:
+        lines.append("진행 중인 Task가 없습니다.")
+
+    if task_result:
+        status = task_result.get("status")
+        handled = task_result.get("handled")
+        message = task_result.get("message")
+        error = task_result.get("error") or {}
+
+        result_lines = [
+            "이번 턴에 방금 실행된 Task 결과:",
+            f"- 처리 여부: {'처리됨' if handled else '처리되지 않음'}",
+            f"- 상태: {status or '알 수 없음'}",
+        ]
+        if message:
+            result_lines.append(f"- Task 실행기가 만든 결과 메시지: {message}")
+        if error.get("message"):
+            result_lines.append(f"- 실패 사유: {error['message']}")
+        lines.append("\n".join(result_lines))
+
+    return "\n\n".join(lines)
 
 
 def build_response_instructions(
@@ -73,9 +98,11 @@ def build_response_instructions(
     use_knowledge: bool = False,
     active_task: str | None = None,
     task_step: str | None = None,
+    task_result: dict | None = None,
     rules: list[dict] | None = None,
     channel: str = "web_chat",
     voice_response_style: str = "friendly_short",
+    should_end_session: bool = False,
 ) -> str:
     """
     최종 응답용 시스템 지시문을 구성한다.
@@ -85,7 +112,7 @@ def build_response_instructions(
     Knowledge 검색이 필요한 요청에만 추가한다.
     """
     rules_text = build_rule_instructions_text(rules)
-    task_context = build_task_context_text(active_task, task_step)
+    task_context = build_task_context_text(active_task, task_step, task_result)
     is_voice_channel = channel in {"web_call", "voice"}
 
     if is_voice_channel:
@@ -104,17 +131,31 @@ def build_response_instructions(
 - "제가 확인한 내용으로는", "말씀하신 기준이면", "현재 확인되는 내용은"처럼 사람이 설명하는 연결어를 적절히 사용한다.
 - 단답으로 끝내지 말고 핵심 답변, 중요한 조건, 다음 행동을 이어서 말한다.
 - 한 문장은 짧게 유지하되, 필요한 설명은 3~5문장 정도로 충분히 말한다.
+- 답변이 여러 조건이나 단계를 설명해야 해서 길어질 것 같으면, 본문을 말하기 전에 "확인해보니까요", "잠시만요, 말씀드릴게요"처럼 짧은 운을 먼저 띄우고 이어서 말한다. 다 말한 뒤에 덧붙이지 않는다.
 - 마크다운, 표, 번호 목록, 괄호 설명, 출처 라벨은 말하지 않는다.
 - 시스템, 데이터베이스, 지식 검색, 프롬프트, AI 같은 내부 구현 단어를 사용자에게 말하지 않는다.
 - 모르는 내용은 추측하지 말고 "그 부분은 현재 확인되지 않습니다"처럼 분명히 말한 뒤 필요한 정보를 물어본다.
 - 숫자, 날짜, 시간, 가격은 말로 듣기 쉽게 표현한다.
+- Task 실행 결과가 있으면(아래 [현재 요청 상태] 참고) 그 결과를 바탕으로 자연스럽게 마무리하고, 처리가 끝났다면 "추가로 더 도와드릴 일이 있으신가요?" 같은 후속 질문으로 마친다. 실패했다면 사유를 짧게 안내하고 대안을 제시한다.
 {style_instruction}""",
-            f"""[현재 요청 상태]
+        ]
+        if should_end_session:
+            end_label = "통화" if is_voice_channel else "상담"
+            sections[0] += f"""
+
+[{end_label} 종료]
+- 사용자가 {end_label} 종료를 요청했다. 짧고 따뜻한 작별 인사만 한다.
+- "통화를 종료하겠습니다", "채팅을 종료합니다"처럼 시스템적으로 말하지 말고, "네, 감사합니다. 좋은 하루 되세요"처럼 자연스럽게 마무리한다.
+- 추가 질문이나 "더 도와드릴 일이 있으신가요?"는 하지 않는다."""
+        sections.extend(
+            [
+                f"""[현재 요청 상태]
 intent: {intent or 'unknown'}
 {task_context}""",
-            f"""[조직별 응답 규칙]
+                f"""[조직별 응답 규칙]
 {rules_text}""",
-        ]
+            ]
+        )
     else:
         channel_principles = [
             "- 한국어로 자연스럽고 간결하게 답변한다.",
@@ -133,6 +174,13 @@ intent: {intent or 'unknown'}
             f"""[조직별 응답 규칙]
 {rules_text}""",
         ]
+        if should_end_session:
+            sections.append(
+                """[상담 종료]
+- 사용자가 상담 종료를 요청했다. 짧고 따뜻한 작별 인사만 한다.
+- "채팅을 종료합니다"처럼 시스템적으로 말하지 말고, "네, 감사합니다. 좋은 하루 되세요"처럼 자연스럽게 마무리한다.
+- 추가 질문이나 "더 도와드릴 일이 있으신가요?"는 하지 않는다."""
+            )
 
     if use_knowledge:
         knowledge_text = (

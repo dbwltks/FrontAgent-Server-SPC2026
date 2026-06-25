@@ -9,6 +9,7 @@ from app.graph.nodes.decision_node import decision_node
 from app.graph.nodes.knowledge_node import knowledge_node
 from app.graph.nodes.rule_node import rule_node
 from app.graph.nodes.response_node import response_node
+from app.graph.nodes.end_session_node import end_session_node
 from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
 
@@ -29,6 +30,9 @@ def route_after_join(state: AgentState) -> str:
     """
     if not state.get("ai_enabled", True):
         return "ai_handoff"
+
+    if state.get("next_action") == "end_session":
+        return "response"
 
     if state.get("has_active_task", False):
         if state.get("next_action") == "search_knowledge":
@@ -100,6 +104,7 @@ def build_graph(checkpointer=None):
     graph.add_node("rule", rule_node)
     graph.add_node("response", response_node)
     graph.add_node("save_ai_message", save_ai_message_node)
+    graph.add_node("end_session", end_session_node)
     graph.add_node("save_agent_run", save_agent_run_node)
 
     # conversation(DB 조회)·decision(LLM 분류)·rule(DB 조회)을 동시에 시작한다.
@@ -127,14 +132,17 @@ def build_graph(checkpointer=None):
     )
     graph.add_edge("ai_handoff", END)
 
-    graph.add_edge("task", "save_ai_message")
+    # task 실행 결과(성공/실패/다음 단계)도 knowledge처럼 항상 response를 거쳐
+    # LLM이 자연스러운 마무리·후속 질문을 만들게 한다.
+    graph.add_edge("task", "response")
 
     # rules는 START에서 이미 병렬 조회됐으므로 knowledge 후 바로 응답으로 간다.
     graph.add_edge("knowledge", "response")
 
     # 응답 저장 및 로그 저장
     graph.add_edge("response", "save_ai_message")
-    graph.add_edge("save_ai_message", "save_agent_run")
+    graph.add_edge("save_ai_message", "end_session")
+    graph.add_edge("end_session", "save_agent_run")
     graph.add_edge("save_agent_run", END)
 
     return graph.compile(checkpointer=checkpointer)

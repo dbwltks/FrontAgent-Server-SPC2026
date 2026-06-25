@@ -22,6 +22,7 @@ from app.services.voice_pipeline import (
 )
 from app.services.voice_stt import (
     read_audio_upload,
+    SUPPORTED_TRANSCRIPTION_UPLOADS,
     transcribe_audio_content,
 )
 from app.services.voice_tts import (
@@ -38,6 +39,15 @@ router = APIRouter(prefix="/voice", tags=["Voice"])
 logger = logging.getLogger(__name__)
 OPENAI_REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 REALTIME_ERROR_MESSAGE = "Realtime voice connection failed"
+VOICE_UPLOAD_CONFIG = {
+    # MediaRecorder 기본 webm/opus를 wav로 변환하지 말고 그대로 보내는 쪽이
+    # 업로드 준비 시간과 전송 크기를 줄인다. voice_stt가 codec 파라미터를 제거해
+    # OpenAI transcription multipart에 맞는 audio/webm으로 정규화한다.
+    "preferred_upload_content_type": "audio/webm;codecs=opus",
+    "preferred_upload_extension": "webm",
+    "convert_to_wav_before_upload": False,
+    "supported_upload_content_types": sorted(SUPPORTED_TRANSCRIPTION_UPLOADS.keys()),
+}
 
 
 class SpeechRequest(BaseModel):
@@ -54,6 +64,8 @@ class VoiceTurnResponse(BaseModel):
     messages: list[dict] = Field(default_factory=list)
     audio_base64: str
     audio_content_type: str = TTS_CONTENT_TYPE
+    end_session: bool = False
+    end_call: bool = False
 
 
 def get_voice_mode(organization_id: str | None = None) -> str:
@@ -80,6 +92,7 @@ async def voice_config(organization_id: str | None = None):
             "realtime_model": ai_settings.get("realtime_model"),
             "realtime_voice": ai_settings.get("realtime_voice"),
             "response_style": ai_settings.get("voice_response_style"),
+            "upload": VOICE_UPLOAD_CONFIG,
         }
 
     return {
@@ -87,6 +100,7 @@ async def voice_config(organization_id: str | None = None):
         "stt_model": settings.voice_stt_model,
         "tts_model": settings.voice_tts_model,
         "tts_voice": settings.voice_tts_voice,
+        "upload": VOICE_UPLOAD_CONFIG,
     }
 
 
@@ -264,6 +278,8 @@ async def process_voice_turn(
             },
         ],
         audio_base64=base64.b64encode(speech_content).decode("ascii"),
+        end_session=bool(result.get("should_end_session")),
+        end_call=bool(result.get("should_end_session")),
     )
 
 
