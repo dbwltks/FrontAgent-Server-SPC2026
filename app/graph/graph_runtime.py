@@ -75,6 +75,7 @@ def build_initial_state(
         "intent": None,
         "next_action": None,
         "task_type": None,
+        "task_flow_id": None,
         "use_knowledge": False,
         "decision_reason": None,
         "task_result": None,

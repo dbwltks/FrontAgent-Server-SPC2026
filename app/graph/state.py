@@ -42,6 +42,9 @@ class AgentState(TypedDict):
     # 예: reservation_create, reservation_lookup, reservation_cancel, none
     task_type: Optional[str]
 
+    # 실행할 task_flow id
+    ask_flow_id: Optional[str]
+
     # Knowledge 검색 여부
     use_knowledge: bool
 

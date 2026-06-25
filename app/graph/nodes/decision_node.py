@@ -25,13 +25,23 @@ class DecisionResult(BaseModel):
     모델이 이 스키마를 어길 수 없으므로 JSON 파싱 실패 자체가 일어나지 않는다.
     """
 
-    intent: Literal["pricing", "reservation", "handoff", "faq", "general"]
+    intent: Literal[
+        "pricing",
+        "reservation",
+        "product_order",
+        "order_lookup",
+        "handoff",
+        "faq",
+        "general",
+    ]
     next_action: Literal["search_knowledge", "run_task", "handoff", "respond_general"]
     task_type: Literal[
         "reservation_create",
         "reservation_lookup",
         "reservation_cancel",
         "reservation_update",
+        "product_order",
+        "order_lookup",
         "none",
     ]
     use_knowledge: bool
@@ -40,11 +50,28 @@ class DecisionResult(BaseModel):
 
 DECISION_INSTRUCTIONS = f"""
 고객 메시지를 분석해 intent/next_action/task_type/use_knowledge/knowledge_queries를 판단한다.
-직전 대화 맥락이 주어지면, 후속 질문("그거 얼마야?" 등)의 의도를 맥락에 맞게 판단한다.
+직전 대화 맥락이 주어지면, 후속 질문("그거 얼마야?", "1번으로 할게요" 등)의 의도를 맥락에 맞게 판단한다.
 
 규칙:
 - 정보 문의(가격·정책·안내·서비스 차이 등) → search_knowledge, use_knowledge:true, task_type:none
-- 예약 실행 요청 → run_task, use_knowledge:false (create/lookup/cancel/update 구분)
+
+- 예약 실행 요청 → run_task, use_knowledge:false
+  - 새 예약: intent=reservation, task_type=reservation_create
+  - 예약 조회: intent=reservation, task_type=reservation_lookup
+  - 예약 취소: intent=reservation, task_type=reservation_cancel
+  - 예약 변경: intent=reservation, task_type=reservation_update
+
+- 상품 구매/주문 요청 → run_task, use_knowledge:false, intent=product_order, task_type=product_order
+  - 예: "반팔 티셔츠 주문하고 싶어요"
+  - 예: "이어폰 사고 싶어요"
+  - 예: "장난감 주문할게요"
+  - 예: "티셔츠 하나 살게요"
+
+- 주문 상태/배송 조회 요청 → run_task, use_knowledge:false, intent=order_lookup, task_type=order_lookup
+  - 예: "내 주문 어떻게 됐어?"
+  - 예: "배송 언제 와?"
+  - 예: "주문 상태 알려줘"
+
 - 상담사·직원 연결 → handoff, use_knowledge:false
 - 인사·잡담 → respond_general, use_knowledge:false
 - 애매하면 search_knowledge 선택
@@ -55,7 +82,7 @@ knowledge_queries 규칙:
 - 사용자가 여러 정보를 한 번에 물어보는 복합 질문일 때만 서로 다른 정보 문의로 분리한다.
 - 원문 질문을 포함한 최종 검색어는 최대 {MAX_KNOWLEDGE_QUERIES}개다.
 - 각 항목은 knowledge 검색에 바로 사용할 수 있는 짧고 명확한 한국어 질문으로 만든다.
-- 예약/상담사 연결/인사 요청은 절대 knowledge_queries에 넣지 않는다.
+- 예약/상품 주문/주문 조회/상담사 연결/인사 요청은 절대 knowledge_queries에 넣지 않는다.
 - 같은 의미의 질문은 중복 제거한다.
 """.strip()
 
@@ -137,6 +164,14 @@ async def decision_node(state: AgentState) -> dict:
     # 영속화하는 구조화된 필드(active_task/task_step)에 별도로 유지한다.
     if decision.intent == "reservation":
         update["active_task"] = "reservation"
+        update["task_step"] = state.get("task_step") or "started"
+
+    elif decision.intent == "product_order":
+        update["active_task"] = "product_order"
+        update["task_step"] = state.get("task_step") or "started"
+
+    elif decision.intent == "order_lookup":
+        update["active_task"] = "order_lookup"
         update["task_step"] = state.get("task_step") or "started"
 
     return update

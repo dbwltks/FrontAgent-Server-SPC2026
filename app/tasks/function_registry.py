@@ -4,6 +4,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 from supabase import create_client
 from app.core.config import settings
+import re
 
 from app.repositories.reservation_repo import (
     NotFoundError,
@@ -316,19 +317,130 @@ def _normalize_status_filter(value: Any) -> list[str] | None:
     return [str(value).strip()]
 
 
-def _parse_positive_int(value: Any) -> int | None:
-    if value is None or value == "":
+
+
+def _normalize_choice_text(value) -> str:
+    if value is None:
+        return ""
+
+    return str(value).strip().lower().replace(" ", "")
+
+
+def _parse_choice_number(value) -> int | None:
+    """
+    '1', '1번', '1 번' 같은 입력을 1로 변환한다.
+    숫자가 없으면 None.
+    """
+    if value is None:
         return None
 
-    try:
-        parsed = int(str(value).replace("번", "").strip())
-    except ValueError:
+    text = str(value).strip()
+
+    match = re.search(r"\d+", text)
+    if not match:
         return None
 
-    if parsed <= 0:
-        return None
+    parsed = int(match.group())
+    return parsed if parsed > 0 else None
 
-    return parsed
+
+def _as_option_values(raw_options) -> list[str]:
+    """
+    products.options 안의 옵션 배열을 문자열 리스트로 정규화한다.
+
+    지원:
+    ["검정색", "흰색"]
+
+    혹시 기존 테스트 데이터가 dict 형태여도 깨지지 않게 처리:
+    [{"value":"white","label":"흰색"}]
+    """
+    values: list[str] = []
+
+    for option in raw_options or []:
+        if isinstance(option, dict):
+            label = option.get("label") or option.get("value")
+            if label:
+                values.append(str(label).strip())
+        else:
+            values.append(str(option).strip())
+
+    return [value for value in values if value]
+
+
+def _format_numbered_options(values: list[str]) -> str:
+    if not values:
+        return "선택 가능한 옵션이 없습니다."
+
+    return "\n".join(
+        f"{index}. {value}"
+        for index, value in enumerate(values, start=1)
+    )
+
+
+def _match_allowed_option(user_input, allowed_values: list[str]) -> dict:
+    """
+    사용자가 입력한 값이 허용 옵션 중 하나인지 확인한다.
+
+    허용:
+    - 번호 선택: 1번, 2번
+    - 정확한 옵션명: 검정색, 흰색, M, L
+
+    비허용:
+    - 허용 옵션에 없는 별칭: 하얀색, 블랙 등
+      단, 사장님이 options에 직접 '하얀색'을 넣었다면 허용됨.
+    """
+    choice_number = _parse_choice_number(user_input)
+
+    if choice_number is not None:
+        index = choice_number - 1
+
+        if 0 <= index < len(allowed_values):
+            return {
+                "matched": True,
+                "value": allowed_values[index],
+                "input": user_input,
+                "match_type": "number",
+            }
+
+    normalized_input = _normalize_choice_text(user_input)
+
+    for allowed_value in allowed_values:
+        if _normalize_choice_text(allowed_value) == normalized_input:
+            return {
+                "matched": True,
+                "value": allowed_value,
+                "input": user_input,
+                "match_type": "exact",
+            }
+
+    return {
+        "matched": False,
+        "value": None,
+        "input": user_input,
+        "match_type": None,
+    }
+
+
+def _parse_positive_int(value, default: int = 1) -> int:
+    if value is None:
+        return default
+
+    if isinstance(value, int):
+        return value if value > 0 else default
+
+    if isinstance(value, float):
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+
+    text = str(value).strip()
+
+    # "3개", "3 개", "수량 3", "3번" 같은 입력에서 숫자만 추출
+    match = re.search(r"\d+", text)
+    if not match:
+        return default
+
+    parsed = int(match.group())
+    return parsed if parsed > 0 else default
 
 
 def _format_reservation_option(
