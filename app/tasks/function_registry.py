@@ -489,7 +489,6 @@ def reservation_get_available_slots(
     """
     organization_id = _get_value(params, variables, "organization_id")
     service_id = _get_value(params, variables, "service_id")
-    calendar_id = _get_value(params, variables, "calendar_id")
     target_date_value = _get_value(
         params,
         variables,
@@ -533,7 +532,6 @@ def reservation_get_available_slots(
             organization_id=organization_id,
             service_id=service_id,
             target_date=target_date,
-            calendar_id=calendar_id,
         )
 
         slots = slot_result.get("slots") or []
@@ -570,7 +568,6 @@ def reservation_get_available_slots(
             "slots": slots,
             "slot_count": len(slots),
             "service_id": slot_result.get("service_id"),
-            "calendar_id": slot_result.get("calendar_id"),
             "date": slot_result.get("date"),
             "timezone": slot_result.get("timezone"),
         }
@@ -600,7 +597,6 @@ def reservation_create_reservation(
     organization_id = _get_value(params, variables, "organization_id")
     conversation_id = _get_value(params, variables, "conversation_id")
     service_id = _get_value(params, variables, "service_id")
-    calendar_id = _get_value(params, variables, "calendar_id")
 
     customer_name = _get_value(params, variables, "customer_name", "name")
     customer_phone = _get_value(params, variables, "customer_phone", "phone")
@@ -646,7 +642,6 @@ def reservation_create_reservation(
             organization_id=organization_id,
             conversation_id=conversation_id,
             service_id=service_id,
-            calendar_id=calendar_id,
             customer_name=customer_name,
             customer_phone=customer_phone,
             customer_email=customer_email,
