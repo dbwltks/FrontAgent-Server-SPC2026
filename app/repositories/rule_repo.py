@@ -1,6 +1,18 @@
+import time
 from datetime import datetime, timezone
 
 from app.core.db import supabase
+
+# 활성 규칙은 organization 설정(app/providers/langchain_provider.py의
+# _organization_cache)과 같은 성격의 작은 정적 메타데이터다. 워커 프로세스
+# 안에서만 유효한 인메모리 TTL 캐시로 충분하고, Redis 왕복을 새로 추가할
+# 만큼 무겁거나 여러 워커 간 즉시 동기화가 필요한 데이터가 아니다.
+_ACTIVE_RULES_CACHE_TTL_SECONDS = 60
+_active_rules_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def _invalidate_active_rules_cache(organization_id: str) -> None:
+    _active_rules_cache.pop(organization_id, None)
 
 
 def utc_now_iso() -> str:
@@ -34,6 +46,7 @@ def create_rule(data: dict) -> dict | None:
     if not result.data:
         return None
 
+    _invalidate_active_rules_cache(data["organization_id"])
     return result.data[0]
 
 
@@ -119,6 +132,7 @@ def update_rule(
     if not result.data:
         return None
 
+    _invalidate_active_rules_cache(organization_id)
     return result.data[0]
 
 
@@ -138,7 +152,10 @@ def delete_rule(
         .execute()
     )
 
-    return bool(result.data)
+    deleted = bool(result.data)
+    if deleted:
+        _invalidate_active_rules_cache(organization_id)
+    return deleted
 
 
 def get_active_rules(organization_id: str) -> list[dict]:
@@ -147,7 +164,16 @@ def get_active_rules(organization_id: str) -> list[dict]:
 
     여기서는 사용자 메시지와 규칙을 비교하지 않는다.
     단순히 현재 조직에 등록된 활성 규칙을 가져오기만 한다.
+
+    관리자가 가끔 수정하는 정적 메타데이터라 짧은 TTL로 캐싱하고,
+    create/update/delete 시점에 바로 무효화해 지연을 최소화한다.
     """
+
+    cached = _active_rules_cache.get(organization_id)
+    now = time.monotonic()
+
+    if cached is not None and now - cached[0] < _ACTIVE_RULES_CACHE_TTL_SECONDS:
+        return cached[1]
 
     result = (
         supabase.table("rules")
@@ -158,4 +184,6 @@ def get_active_rules(organization_id: str) -> list[dict]:
         .execute()
     )
 
-    return result.data or []
+    rules = result.data or []
+    _active_rules_cache[organization_id] = (now, rules)
+    return rules

@@ -45,6 +45,7 @@ def _resolve_organization_config(organization_id: str) -> dict:
         "model": model,
         # decision_model이 비어 있으면 응답용 모델을 그대로 분류에도 쓴다.
         "decision_model": organization.get("decision_model") or model,
+        "voice_response_style": organization.get("voice_response_style", "friendly_short"),
     }
 
     _organization_cache[organization_id] = (now, config)
@@ -68,6 +69,15 @@ async def get_decision_chat_model(organization_id: str) -> ChatOpenAI:
     """
     config = await asyncio.to_thread(_resolve_organization_config, organization_id)
     return _chat_model_for(config["provider"], config["decision_model"], streaming=False)
+
+
+async def get_voice_response_style(organization_id: str) -> str:
+    """
+    response_node가 매 턴마다 organization_ai_settings를 별도로 조회하지 않도록,
+    이미 60초 TTL로 캐시된 organization 설정에서 응답 말투만 꺼내준다.
+    """
+    config = await asyncio.to_thread(_resolve_organization_config, organization_id)
+    return config["voice_response_style"]
 
 
 def _history_to_messages(conversation_history: list[dict] | None) -> list:
