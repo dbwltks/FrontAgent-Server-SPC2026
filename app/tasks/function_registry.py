@@ -17,6 +17,29 @@ from app.repositories.reservation_repo import (
     list_reservations as repo_list_reservations,
     list_services as repo_list_services,
 )
+
+from app.repositories.product_repo import (
+    ProductNotFoundError,
+    ProductRepoError,
+    ProductStockError,
+    check_product_stock as repo_check_product_stock,
+    get_product as repo_get_product,
+    list_products as repo_list_products,
+    search_products as repo_search_products,
+)
+
+from app.repositories.order_repo import (
+    OrderNotFoundError,
+    OrderRepoError,
+    OrderStatusError,
+    cancel_order as repo_cancel_order,
+    confirm_order as repo_confirm_order,
+    create_order as repo_create_order,
+    get_order as repo_get_order,
+    lookup_orders_by_phone as repo_lookup_orders_by_phone,
+)
+
+
 TaskFunctionHandler = Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
@@ -221,6 +244,57 @@ def _domain_error_result(error: Exception) -> dict[str, Any]:
         "message": str(error),
     }
 
+def _product_order_error_result(error: Exception) -> dict[str, Any]:
+    if isinstance(error, ProductNotFoundError):
+        return {
+            "ok": False,
+            "error_code": "product_not_found",
+            "message": str(error),
+        }
+
+    if isinstance(error, ProductStockError):
+        return {
+            "ok": False,
+            "error_code": "product_stock_error",
+            "message": str(error),
+        }
+
+    if isinstance(error, ProductRepoError):
+        return {
+            "ok": False,
+            "error_code": "product_repo_error",
+            "message": str(error),
+        }
+
+    if isinstance(error, OrderNotFoundError):
+        return {
+            "ok": False,
+            "error_code": "order_not_found",
+            "message": str(error),
+        }
+
+    if isinstance(error, OrderStatusError):
+        return {
+            "ok": False,
+            "error_code": "order_status_error",
+            "message": str(error),
+        }
+
+    if isinstance(error, OrderRepoError):
+        return {
+            "ok": False,
+            "error_code": "order_repo_error",
+            "message": str(error),
+        }
+
+    return {
+        "ok": False,
+        "error_code": "unknown_error",
+        "message": str(error),
+    }
+
+
+
 def _normalize_status_filter(value: Any) -> list[str] | None:
     if value is None or value == "":
         return None
@@ -332,6 +406,83 @@ def _resolve_reservation_id_from_memory(
         return None
 
     return selected.get("id")
+
+def _format_product_option(
+    product: dict[str, Any],
+    index: int,
+) -> dict[str, Any]:
+    return {
+        "number": index,
+        "product_id": product.get("id"),
+        "name": product.get("name"),
+        "category": product.get("category"),
+        "price": product.get("price"),
+        "stock_quantity": product.get("stock_quantity"),
+        "label": (
+            f"{index}. {product.get('name')} / "
+            f"{product.get('category') or '카테고리 없음'} / "
+            f"{product.get('price') or 0}원 / "
+            f"재고 {product.get('stock_quantity') or 0}개"
+        ),
+    }
+
+
+def _resolve_product_id_from_memory(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> str | None:
+    product_id = _get_value(
+        params,
+        variables,
+        "product_id",
+        "selected_product_id",
+    )
+
+    if product_id:
+        return str(product_id)
+
+    selected_number = _get_value(
+        params,
+        variables,
+        "selected_product_number",
+        "product_number",
+        "selected_number",
+        "selected_option_no",
+        "option_no",
+    )
+
+    parsed_number = _parse_positive_int(selected_number)
+
+    if not parsed_number:
+        return None
+
+    products = _get_value(
+        params,
+        variables,
+        "products",
+        "product_options",
+        "search_result.products",
+        "search_result.product_options",
+        "product_search_result.products",
+        "product_search_result.product_options",
+        "product.list_products_result.products",
+        "product.search_products_result.products",
+    )
+
+    if not isinstance(products, list):
+        return None
+
+    index = parsed_number - 1
+
+    if index < 0 or index >= len(products):
+        return None
+
+    selected = products[index]
+
+    if not isinstance(selected, dict):
+        return None
+
+    return selected.get("product_id") or selected.get("id")
 
 
 def check_required_variables(
@@ -893,6 +1044,497 @@ def reservation_cancel_reservation(
         )
         return result
 
+def product_list_products(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    category = _get_value(params, variables, "category")
+    limit_value = _get_value(params, variables, "limit", default=20)
+    limit = _parse_positive_int(limit_value) or 20
+
+    if not organization_id:
+        return {
+            "ok": False,
+            "error_code": "organization_id_missing",
+            "message": "organization_id가 필요합니다.",
+            "products": [],
+            "product_options": [],
+            "count": 0,
+        }
+
+    try:
+        products = repo_list_products(
+            organization_id=organization_id,
+            category=category,
+            limit=limit,
+        )
+
+        product_options = [
+            _format_product_option(product, index)
+            for index, product in enumerate(products, start=1)
+        ]
+
+        return {
+            "ok": True,
+            "products": products,
+            "product_options": product_options,
+            "has_products": len(products) > 0,
+            "count": len(products),
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "products": [],
+                "product_options": [],
+                "has_products": False,
+                "count": 0,
+            }
+        )
+        return result
+
+
+def product_search_products(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    keyword = _get_value(
+        params,
+        variables,
+        "keyword",
+        "product_name",
+        "category",
+        "user_message",
+    )
+    category = _get_value(params, variables, "category")
+    limit_value = _get_value(params, variables, "limit", default=20)
+    limit = _parse_positive_int(limit_value) or 20
+
+    if not organization_id:
+        return {
+            "ok": False,
+            "error_code": "organization_id_missing",
+            "message": "organization_id가 필요합니다.",
+            "products": [],
+            "product_options": [],
+            "count": 0,
+        }
+
+    try:
+        products = repo_search_products(
+            organization_id=organization_id,
+            keyword=keyword,
+            category=category,
+            limit=limit,
+        )
+
+        product_options = [
+            _format_product_option(product, index)
+            for index, product in enumerate(products, start=1)
+        ]
+
+        return {
+            "ok": True,
+            "keyword": keyword,
+            "category": category,
+            "products": products,
+            "product_options": product_options,
+            "has_products": len(products) > 0,
+            "count": len(products),
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "products": [],
+                "product_options": [],
+                "has_products": False,
+                "count": 0,
+            }
+        )
+        return result
+
+
+def product_get_product_detail(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    product_id = _resolve_product_id_from_memory(params, variables)
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not product_id:
+        missing_keys.append("product_id")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "found": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "product": None,
+        }
+
+    try:
+        product = repo_get_product(
+            organization_id=organization_id,
+            product_id=product_id,
+        )
+
+        if not product:
+            return {
+                "ok": False,
+                "found": False,
+                "error_code": "product_not_found",
+                "product_id": product_id,
+                "product": None,
+            }
+
+        return {
+            "ok": True,
+            "found": True,
+            "product_id": product.get("id"),
+            "product": product,
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "found": False,
+                "product": None,
+            }
+        )
+        return result
+
+
+def product_check_stock(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    product_id = _resolve_product_id_from_memory(params, variables)
+    quantity_value = _get_value(params, variables, "quantity", default=1)
+    quantity = _parse_positive_int(quantity_value) or 1
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not product_id:
+        missing_keys.append("product_id")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "available": False,
+            "is_available": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "product_id": None,
+            "requested_quantity": quantity,
+        }
+
+    try:
+        stock_result = repo_check_product_stock(
+            organization_id=organization_id,
+            product_id=product_id,
+            quantity=quantity,
+        )
+
+        return {
+            "ok": True,
+            "available": stock_result.get("available"),
+            "is_available": stock_result.get("available"),
+            **stock_result,
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "available": False,
+                "is_available": False,
+                "product_id": product_id,
+                "requested_quantity": quantity,
+            }
+        )
+        return result
+
+def order_create_order(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    customer_name = _get_value(params, variables, "customer_name", "name")
+    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    customer_email = _get_value(params, variables, "customer_email", "email")
+
+    recipient_name = _get_value(params, variables, "recipient_name")
+    recipient_phone = _get_value(params, variables, "recipient_phone")
+    postal_code = _get_value(params, variables, "postal_code")
+    address_line1 = _get_value(params, variables, "address_line1", "address")
+    address_line2 = _get_value(params, variables, "address_line2")
+    delivery_memo = _get_value(params, variables, "delivery_memo")
+    source_channel = _get_value(params, variables, "source_channel", default="web_chat")
+    memo = _get_value(params, variables, "memo")
+
+    items = _get_value(params, variables, "items", "order_items")
+
+    if not isinstance(items, list):
+        product_id = _resolve_product_id_from_memory(params, variables)
+        quantity_value = _get_value(params, variables, "quantity", default=1)
+        quantity = _parse_positive_int(quantity_value) or 1
+        selected_options = _get_value(params, variables, "selected_options", default={})
+
+        if product_id:
+            items = [
+                {
+                    "product_id": product_id,
+                    "quantity": quantity,
+                    "selected_options": selected_options or {},
+                }
+            ]
+        else:
+            items = []
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not customer_name:
+        missing_keys.append("customer_name")
+
+    if not customer_phone:
+        missing_keys.append("customer_phone")
+
+    if not items:
+        missing_keys.append("items")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "created": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "order_id": None,
+            "order": None,
+        }
+
+    try:
+        order = repo_create_order(
+            organization_id=organization_id,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_email=customer_email,
+            items=items,
+            recipient_name=recipient_name,
+            recipient_phone=recipient_phone,
+            postal_code=postal_code,
+            address_line1=address_line1,
+            address_line2=address_line2,
+            delivery_memo=delivery_memo,
+            source_channel=source_channel,
+            memo=memo,
+        )
+
+        return {
+            "ok": True,
+            "created": True,
+            "order_id": order.get("id"),
+            "order_code": order.get("order_code"),
+            "order_status": order.get("order_status"),
+            "delivery_status": order.get("delivery_status"),
+            "total_amount": order.get("total_amount"),
+            "order": order,
+            "message": "주문 요청이 접수되었습니다.",
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "created": False,
+                "order_id": None,
+                "order": None,
+            }
+        )
+        return result
+
+
+def order_lookup_orders(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    limit_value = _get_value(params, variables, "limit", default=10)
+    limit = _parse_positive_int(limit_value) or 10
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not customer_phone:
+        missing_keys.append("customer_phone")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "found": False,
+            "has_orders": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "orders": [],
+            "count": 0,
+        }
+
+    try:
+        orders = repo_lookup_orders_by_phone(
+            organization_id=organization_id,
+            customer_phone=customer_phone,
+            limit=limit,
+        )
+
+        return {
+            "ok": True,
+            "found": len(orders) > 0,
+            "has_orders": len(orders) > 0,
+            "customer_phone": customer_phone,
+            "orders": orders,
+            "count": len(orders),
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "found": False,
+                "has_orders": False,
+                "orders": [],
+                "count": 0,
+            }
+        )
+        return result
+
+
+def order_confirm_order(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    order_id = _get_value(params, variables, "order_id", "selected_order_id")
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not order_id:
+        missing_keys.append("order_id")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "confirmed": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "order_id": None,
+            "order": None,
+        }
+
+    try:
+        order = repo_confirm_order(
+            organization_id=organization_id,
+            order_id=order_id,
+        )
+
+        return {
+            "ok": True,
+            "confirmed": True,
+            "order_id": order.get("id"),
+            "order_status": order.get("order_status"),
+            "delivery_status": order.get("delivery_status"),
+            "order": order,
+            "message": "주문이 확정되었습니다.",
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "confirmed": False,
+                "order_id": order_id,
+                "order": None,
+            }
+        )
+        return result
+
+
+def order_cancel_order(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    order_id = _get_value(params, variables, "order_id", "selected_order_id")
+
+    missing_keys = []
+
+    if not organization_id:
+        missing_keys.append("organization_id")
+
+    if not order_id:
+        missing_keys.append("order_id")
+
+    if missing_keys:
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error_code": "missing_required_fields",
+            "missing_keys": missing_keys,
+            "order_id": None,
+            "order": None,
+        }
+
+    try:
+        order = repo_cancel_order(
+            organization_id=organization_id,
+            order_id=order_id,
+        )
+
+        return {
+            "ok": True,
+            "cancelled": True,
+            "order_id": order.get("id"),
+            "order_status": order.get("order_status"),
+            "delivery_status": order.get("delivery_status"),
+            "order": order,
+            "message": "주문이 취소되었습니다.",
+        }
+
+    except Exception as error:
+        result = _product_order_error_result(error)
+        result.update(
+            {
+                "cancelled": False,
+                "order_id": order_id,
+                "order": None,
+            }
+        )
+        return result
+
+
 
 
 FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
@@ -960,6 +1602,46 @@ FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
         name="reservation.create_reservation",
         handler=reservation_create_reservation,
         description="수집된 고객/서비스/시간 정보로 예약 요청을 생성한다.",
+    ),
+        "product.list_products": RegisteredTaskFunction(
+        name="product.list_products",
+        handler=product_list_products,
+        description="조직의 상품 목록을 조회한다.",
+    ),
+    "product.search_products": RegisteredTaskFunction(
+        name="product.search_products",
+        handler=product_search_products,
+        description="상품명, 카테고리, 설명 기준으로 상품을 검색한다.",
+    ),
+    "product.get_product_detail": RegisteredTaskFunction(
+        name="product.get_product_detail",
+        handler=product_get_product_detail,
+        description="상품 ID 또는 선택 번호 기준으로 상품 상세를 조회한다.",
+    ),
+    "product.check_stock": RegisteredTaskFunction(
+        name="product.check_stock",
+        handler=product_check_stock,
+        description="상품 재고를 확인한다.",
+    ),
+    "order.create_order": RegisteredTaskFunction(
+        name="order.create_order",
+        handler=order_create_order,
+        description="수집된 고객/상품/배송 정보로 상품 주문 요청을 생성한다.",
+    ),
+    "order.lookup_orders": RegisteredTaskFunction(
+        name="order.lookup_orders",
+        handler=order_lookup_orders,
+        description="고객 전화번호 기준으로 주문 목록을 조회한다.",
+    ),
+    "order.confirm_order": RegisteredTaskFunction(
+        name="order.confirm_order",
+        handler=order_confirm_order,
+        description="주문을 확정하고 상품 재고를 차감한다.",
+    ),
+    "order.cancel_order": RegisteredTaskFunction(
+        name="order.cancel_order",
+        handler=order_cancel_order,
+        description="주문을 취소한다.",
     ),
 }
 
