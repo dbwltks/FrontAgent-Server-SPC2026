@@ -1,6 +1,6 @@
 from typing import Any
 
-from app.tasks.edge_evaluator import select_failure_edge, select_next_edge
+from app.tasks.edge_evaluator import evaluate_condition_expression, select_failure_edge, select_next_edge
 from app.tasks.executors import EXECUTOR_MAP
 from app.tasks.memory import TaskMemory
 from app.tasks.repository import TaskRepository
@@ -89,12 +89,9 @@ class DynamicTaskRunner:
         current_node_key = task_session["current_node_key"]
         variables = task_session.get("variables") or {}
 
-        # waiting_user_input 상태일 때만 이번 사용자 메시지를 현재 Ask Node 입력으로 사용한다.
-        user_input_for_current_node = (
-            user_message
-            if task_session.get("status") == "waiting_user_input"
-            else None
-        )
+        # waiting_user_input 상태일 때만 이번 사용자 메시지를 현재 노드 입력으로 사용한다.
+        # instruction 노드는 매 턴 사용자 메시지를 보고 직접 판단하므로 항상 전달한다.
+        was_waiting_for_input = task_session.get("status") == "waiting_user_input"
 
         max_steps = 20
 
@@ -115,6 +112,12 @@ class DynamicTaskRunner:
                         "message": f"Node not found: {current_node_key}",
                     },
                 )
+
+            user_input_for_current_node = (
+                user_message
+                if was_waiting_for_input or node.get("node_type") == "instruction"
+                else None
+            )
 
             memory = TaskMemory(variables)
 
@@ -210,7 +213,7 @@ class DynamicTaskRunner:
 
                 if failure_node_key:
                     current_node_key = failure_node_key
-                    user_input_for_current_node = None
+                    was_waiting_for_input = False
                     continue
 
                 return self._mark_failed(
@@ -222,21 +225,39 @@ class DynamicTaskRunner:
                     message=executor_result.message,
                 )
 
-            edges = self.repository.list_edges_from(
-                flow_id=flow_id,
-                source_node_key=current_node_key,
-            )
+            if self._is_terminal_node_config(node):
+                self.repository.update_session(
+                    task_session_id,
+                    {
+                        "current_node_key": current_node_key,
+                        "waiting_node_key": None,
+                        "variables": variables,
+                        "status": "completed",
+                    },
+                )
 
-            next_edge = select_next_edge(
-                edges=edges,
+                return TaskRunResponse(
+                    handled=True,
+                    message=executor_result.message,
+                    status="completed",
+                    flow_id=flow_id,
+                    task_session_id=task_session_id,
+                    current_node_key=current_node_key,
+                    variables=variables,
+                )
+
+            next_node_key = self._resolve_next_node_key(
+                node=node,
+                flow_id=flow_id,
+                current_node_key=current_node_key,
                 variables=variables,
             )
 
-            if not next_edge:
+            if not next_node_key:
                 normalized_error = normalize_task_error(
                     {
-                        "code": "NEXT_EDGE_NOT_FOUND",
-                        "message": f"No valid edge from node: {current_node_key}",
+                        "code": "NEXT_NODE_NOT_FOUND",
+                        "message": f"No valid next node from node: {current_node_key}",
                     },
                     node_key=current_node_key,
                     node_type=node.get("node_type"),
@@ -251,7 +272,7 @@ class DynamicTaskRunner:
                     message=executor_result.message,
                 )
 
-            current_node_key = next_edge["target_node_key"]
+            current_node_key = next_node_key
 
             self.repository.update_session(
                 task_session_id,
@@ -264,7 +285,7 @@ class DynamicTaskRunner:
             )
 
             # 사용자 입력은 현재 waiting node에서 한 번만 소비한다.
-            user_input_for_current_node = None
+            was_waiting_for_input = False
 
             # Message Node의 message가 있으면 일단 사용자에게 반환한다.
             # 다음 노드까지 계속 자동 진행하면 메시지가 여러 개 합쳐질 수 있으므로
@@ -290,6 +311,53 @@ class DynamicTaskRunner:
                 "message": "Task runner exceeded max steps.",
             },
         )
+
+    def _get_next_step_mode(self, node: dict[str, Any]) -> str:
+        config = node.get("config") or {}
+        mode = config.get("next_step_mode")
+        return mode if mode in {"single", "branch", "end"} else "single"
+
+    def _is_terminal_node_config(self, node: dict[str, Any]) -> bool:
+        return self._get_next_step_mode(node) == "end"
+
+    def _resolve_next_node_key(
+        self,
+        node: dict[str, Any],
+        flow_id: str,
+        current_node_key: str,
+        variables: dict[str, Any],
+    ) -> str | None:
+        config = node.get("config") or {}
+        mode = self._get_next_step_mode(node)
+
+        if mode == "single":
+            next_node_key = config.get("next_node_key")
+            if self._node_key_exists(flow_id, next_node_key):
+                return next_node_key
+
+        if mode == "branch":
+            condition_matched = evaluate_condition_expression(
+                config.get("branch_condition"),
+                variables,
+            )
+            next_node_key = config.get("branch_node_key") if condition_matched else config.get("fallback_node_key")
+            if self._node_key_exists(flow_id, next_node_key):
+                return next_node_key
+
+        edges = self.repository.list_edges_from(
+            flow_id=flow_id,
+            source_node_key=current_node_key,
+        )
+        next_edge = select_next_edge(
+            edges=edges,
+            variables=variables,
+        )
+        return next_edge["target_node_key"] if next_edge else None
+
+    def _node_key_exists(self, flow_id: str, node_key: str | None) -> bool:
+        if not node_key:
+            return False
+        return self.repository.get_node_by_key(flow_id=flow_id, node_key=node_key) is not None
 
     def _execute_node(
         self,
