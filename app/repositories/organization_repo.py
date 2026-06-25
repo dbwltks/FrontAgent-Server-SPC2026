@@ -21,4 +21,5 @@ def get_organization(organization_id: str) -> dict | None:
         "llm_provider": ai_settings.get("llm_provider") or organization.get("llm_provider"),
         "llm_model": ai_settings.get("llm_model") or organization.get("llm_model"),
         "decision_model": ai_settings.get("decision_model"),
+        "voice_response_style": ai_settings.get("voice_response_style", "friendly_short"),
     }

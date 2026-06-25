@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from app.core.config import settings
+from app.tasks.repository import invalidate_enabled_flow_cache
 from app.tasks.runner import DynamicTaskRunner
 
 
@@ -230,6 +231,7 @@ def create_task_flow(request: TaskFlowCreateRequest):
             detail="Task flow creation failed.",
         )
 
+    invalidate_enabled_flow_cache(request.organization_id)
     return rows[0]
 
 
@@ -310,6 +312,7 @@ def update_task_flow(flow_id: str, request: TaskFlowUpdateRequest):
             detail="Task flow not found.",
         )
 
+    invalidate_enabled_flow_cache(rows[0]["organization_id"])
     return rows[0]
 
 
@@ -319,7 +322,7 @@ def delete_task_flow(flow_id: str):
 
     existing_response = (
         client.table("task_flows")
-        .select("id")
+        .select("id, organization_id")
         .eq("id", flow_id)
         .limit(1)
         .execute()
@@ -339,6 +342,8 @@ def delete_task_flow(flow_id: str):
         .eq("id", flow_id)
         .execute()
     )
+
+    invalidate_enabled_flow_cache(existing_rows[0]["organization_id"])
 
     return {
         "deleted": True,
