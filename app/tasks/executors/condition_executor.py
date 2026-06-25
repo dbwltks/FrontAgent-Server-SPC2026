@@ -55,6 +55,7 @@ def execute_condition_node(
     memory: TaskMemory,
     user_message: str | None = None,
     is_waiting_input: bool = False,
+    organization_id: str | None = None,
 ) -> ExecutorResult:
     config = node.get("config") or {}
 

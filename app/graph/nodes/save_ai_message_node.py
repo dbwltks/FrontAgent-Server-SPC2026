@@ -34,6 +34,20 @@ def save_ai_message_node(state: AgentState) -> AgentState:
         "used_knowledge": state.get("used_knowledge", []),
     }
 
+    # task_result는 이미 task_node가 만들어 state에 들고 있는 값이라
+    # 추가 DB 조회 없이 그대로 같이 저장한다. 태스크가 실행되지 않은
+    # 일반 응답 턴에는 task_result가 없으므로 자연히 빠진다.
+    task_result = state.get("task_result")
+    if task_result:
+        metadata["task"] = {
+            "flow_id": task_result.get("flow_id"),
+            "task_session_id": task_result.get("task_session_id"),
+            "current_node_key": task_result.get("current_node_key"),
+            "status": task_result.get("status"),
+            "error": task_result.get("error"),
+            "trace": task_result.get("trace"),
+        }
+
     def _save_ai_message():
         saved_message = create_conversation_message(
             organization_id=organization_id,

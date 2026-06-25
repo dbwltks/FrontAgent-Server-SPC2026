@@ -30,6 +30,9 @@ class TaskRunResponse:
     current_node_key: str | None = None
     variables: dict[str, Any] = field(default_factory=dict)
     error: dict[str, Any] | None = None
+    # 이번 턴에 실제로 거쳐간 노드 경로. runner가 노드를 순회하며 그 자리에서
+    # 채우는 값이라 추가 DB 조회가 없다.
+    trace: list[dict[str, Any]] = field(default_factory=list)
 
 
 def normalize_task_error(

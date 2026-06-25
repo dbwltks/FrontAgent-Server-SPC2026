@@ -10,6 +10,7 @@ def execute_message_node(
     memory: TaskMemory,
     user_message: str | None = None,
     is_waiting_input: bool = False,
+    organization_id: str | None = None,
 ) -> ExecutorResult:
     config = node.get("config") or {}
     message = config.get("message") or node.get("label") or ""

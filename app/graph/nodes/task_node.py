@@ -28,10 +28,11 @@ def _task_response_to_dict(task_response: Any) -> dict:
         "current_node_key": getattr(task_response, "current_node_key", None),
         "variables": getattr(task_response, "variables", None),
         "error": getattr(task_response, "error", None),
+        "trace": getattr(task_response, "trace", None),
     }
 
 
-def task_node(state: AgentState) -> dict:
+async def task_node(state: AgentState) -> dict:
     organization_id = state["organization_id"]
     session_id = state["session_id"]
     user_message = state["user_message"]
@@ -92,7 +93,7 @@ def task_node(state: AgentState) -> dict:
 
         flow_id = flow["id"]
 
-    task_response = runner.run(
+    task_response = await runner.run(
         organization_id=organization_id,
         session_id=session_id,
         user_message=user_message,
