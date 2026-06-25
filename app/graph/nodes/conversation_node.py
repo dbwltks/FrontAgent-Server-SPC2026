@@ -51,6 +51,7 @@ def conversation_node(state: AgentState) -> dict:
     organization_id = state["organization_id"]
     session_id = state["session_id"]
     user_message = state["user_message"]
+    log_message = (state.get("log_message") or user_message).strip()
     channel = state.get("channel", "web_chat")
 
     # 1. organization_id + session_id 기준으로 상담방 찾기 또는 생성
@@ -78,10 +79,11 @@ def conversation_node(state: AgentState) -> dict:
             conversation_id=conversation_id,
             sender_type="customer",
             sender_name="Customer",
-            message=user_message,
+            message=log_message,
             metadata={
                 "session_id": session_id,
                 "channel": channel,
+                "agent_message": user_message if user_message != log_message else None,
             },
         )
 
@@ -97,7 +99,7 @@ def conversation_node(state: AgentState) -> dict:
             update_conversation_last_message(
                 organization_id=organization_id,
                 conversation_id=conversation_id,
-                last_message=user_message,
+                last_message=log_message,
             )
         except Exception:
             logger.warning("Failed to update customer last_message", exc_info=True)

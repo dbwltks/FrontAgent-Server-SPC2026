@@ -8,6 +8,7 @@ class AgentState(TypedDict):
     organization_id: str
     session_id: str
     user_message: str
+    log_message: Optional[str]
     channel: str
 
     # 현재 상담방 ID
