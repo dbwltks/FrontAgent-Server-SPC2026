@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Callable
 
 from app.tasks.edge_evaluator import evaluate_condition_expression, select_failure_edge, select_next_edge
 from app.tasks.executors import EXECUTOR_MAP
@@ -17,6 +17,7 @@ class DynamicTaskRunner:
         session_id: str,
         user_message: str,
         flow_id: str | None = None,
+        on_trace: Callable[[dict[str, Any]], None] | None = None,
     ) -> TaskRunResponse:
         """
         MVP 2단계 기준 실행 방식.
@@ -52,6 +53,7 @@ class DynamicTaskRunner:
             task_session=task_session,
             user_message=user_message,
             organization_id=organization_id,
+            on_trace=on_trace,
         )
 
     def _start_session(
@@ -84,6 +86,7 @@ class DynamicTaskRunner:
         task_session: dict[str, Any],
         user_message: str,
         organization_id: str,
+        on_trace: Callable[[dict[str, Any]], None] | None = None,
     ) -> TaskRunResponse:
         flow_id = task_session["flow_id"]
         task_session_id = task_session["id"]
@@ -139,16 +142,18 @@ class DynamicTaskRunner:
             memory.update(executor_result.memory_updates)
             variables = memory.to_dict()
 
-            trace.append(
-                {
-                    "node_key": current_node_key,
-                    "node_type": node.get("node_type"),
-                    "status": executor_result.status,
-                    "next_behavior": executor_result.next_behavior,
-                    "memory_updates": list(executor_result.memory_updates.keys()),
-                    "error": executor_result.error,
-                }
-            )
+            trace_item = {
+                "node_key": current_node_key,
+                "node_label": node.get("label"),
+                "node_type": node.get("node_type"),
+                "status": executor_result.status,
+                "next_behavior": executor_result.next_behavior,
+                "memory_updates": list(executor_result.memory_updates.keys()),
+                "error": executor_result.error,
+            }
+            trace.append(trace_item)
+            if on_trace:
+                on_trace({**trace_item, "index": len(trace)})
 
             if executor_result.next_behavior == "wait_user":
                 self.repository.update_session(

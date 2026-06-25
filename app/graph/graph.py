@@ -19,13 +19,20 @@ def route_after_join(state: AgentState) -> str:
 
     우선순위:
     1. AI 자동응답 꺼짐 → ai_handoff
-    2. 진행 중 task_session 있음 → task (conversation_node가 미리 조회한 플래그)
-    3. decision_node 결과에 따라 task / knowledge / response
+    2. 진행 중 task_session이 있어도, decision_node가 이번 메시지를 명확히
+       지식 질문(search_knowledge)으로 판단했으면 그쪽을 우선한다.
+       예: 예약 슬롯필링 도중 "강아지 데려가도 되나요?" 같은 질문은
+       task로 흘려보내면 안 된다. 그 외(슬롯 답변처럼 애매한 단답 등)는
+       기존대로 task_session을 우선해 진행한다.
+    3. 진행 중 task_session 있음 → task (conversation_node가 미리 조회한 플래그)
+    4. decision_node 결과에 따라 task / knowledge / response
     """
     if not state.get("ai_enabled", True):
         return "ai_handoff"
 
     if state.get("has_active_task", False):
+        if state.get("next_action") == "search_knowledge":
+            return "knowledge"
         return "task"
 
     return route_after_decision(state)

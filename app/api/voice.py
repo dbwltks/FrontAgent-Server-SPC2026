@@ -108,8 +108,10 @@ class SpeechRequest(BaseModel):
 
 
 class VoiceTurnResponse(BaseModel):
+    conversation_id: str | None = None
     transcript: str
     answer: str
+    messages: list[dict] = Field(default_factory=list)
     audio_base64: str
     audio_content_type: str = TTS_CONTENT_TYPE
 
@@ -511,6 +513,7 @@ async def run_voice_agent_turn(
             organization_id=organization_id,
             session_id=session_id,
             user_message=user_message,
+            log_message=transcript,
             channel="web_call",
         ),
         config=graph_config_for(organization_id, session_id),
@@ -582,6 +585,7 @@ async def stream_pipeline_voice_turn_events(
             organization_id=organization_id,
             session_id=session_id,
             user_message=user_message,
+            log_message=transcript,
             channel="web_call",
         )
         config = graph_config_for(organization_id, session_id)
@@ -679,10 +683,44 @@ async def stream_pipeline_voice_turn_events(
                             "elapsed_ms": elapsed_ms_since(started_at),
                         },
                     )
+                elif chunk.get("type") == "task_step":
+                    step = chunk.get("step") or {}
+                    label = step.get("node_label") or step.get("node_key") or "태스크 단계"
+                    yield sse_event(
+                        "trace",
+                        {
+                            "step": "task",
+                            "status": "step",
+                            "detail": (
+                                f"{label} / "
+                                f"type={step.get('node_type')} / "
+                                f"next={step.get('next_behavior')}"
+                            ),
+                            "items": [step],
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    )
                 continue
 
             for node_name, node_state in chunk.items():
                 final_state.update(node_state)
+
+                if node_name == "conversation":
+                    yield sse_event(
+                        "conversation_message",
+                        {
+                            "conversation_id": node_state.get("conversation_id"),
+                            "sender_type": "customer",
+                            "sender_name": "Customer",
+                            "message": transcript,
+                            "metadata": {
+                                "session_id": session_id,
+                                "channel": "web_call",
+                                "source": "voice_transcript",
+                            },
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    )
 
                 label = NODE_TRACE_LABELS.get(node_name)
                 if not label:
@@ -716,6 +754,22 @@ async def stream_pipeline_voice_turn_events(
             answer = str(final_state.get("final_response") or "".join(answer_chunks)).strip()
             if not answer:
                 raise HTTPException(status_code=502, detail="Agent response is empty")
+
+        yield sse_event(
+            "conversation_message",
+            {
+                "conversation_id": final_state.get("conversation_id"),
+                "sender_type": "ai",
+                "sender_name": "Front Agent",
+                "message": answer,
+                "metadata": {
+                    "session_id": session_id,
+                    "channel": "web_call",
+                    "source": "voice_answer",
+                },
+                "elapsed_ms": elapsed_ms_since(started_at),
+            },
+        )
 
         # 남은 버퍼(마지막 문장)를 합성 예약한다.
         segments, tts_buffer = split_tts_segments(tts_buffer, flush_all=True)
@@ -991,8 +1045,33 @@ async def process_voice_turn(
     )
 
     return VoiceTurnResponse(
+        conversation_id=result.get("conversation_id"),
         transcript=transcript,
         answer=answer,
+        messages=[
+            {
+                "conversation_id": result.get("conversation_id"),
+                "sender_type": "customer",
+                "sender_name": "Customer",
+                "message": transcript,
+                "metadata": {
+                    "session_id": session_id,
+                    "channel": "web_call",
+                    "source": "voice_transcript",
+                },
+            },
+            {
+                "conversation_id": result.get("conversation_id"),
+                "sender_type": "ai",
+                "sender_name": "Front Agent",
+                "message": answer,
+                "metadata": {
+                    "session_id": session_id,
+                    "channel": "web_call",
+                    "source": "voice_answer",
+                },
+            },
+        ],
         audio_base64=base64.b64encode(speech_content).decode("ascii"),
     )
 
