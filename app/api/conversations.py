@@ -28,6 +28,7 @@ class AIEnabledUpdateRequest(BaseModel):
 def get_conversation_list(
     organization_id: str,
     status: str | None = None,
+    channel: str | None = None,
     limit: int = 50,
 ):
     """
@@ -36,17 +37,20 @@ def get_conversation_list(
     예:
     GET /conversations?organization_id=org_test
     GET /conversations?organization_id=org_test&status=open
+    GET /conversations?organization_id=org_test&channel=web_call
     """
 
     conversations = list_conversations(
         organization_id=organization_id,
         status=status,
+        channel=channel,
         limit=limit,
     )
 
     return {
         "organization_id": organization_id,
         "status": status,
+        "channel": channel,
         "count": len(conversations),
         "items": conversations,
     }

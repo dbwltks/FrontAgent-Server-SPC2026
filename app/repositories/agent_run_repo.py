@@ -1,4 +1,5 @@
 from app.core.db import supabase
+from app.repositories.conversation_repo import get_conversation_by_session
 
 
 def create_agent_run(
@@ -59,6 +60,9 @@ def list_agent_runs(
 
     session_id가 있으면 특정 대화방 기록만 조회하고,
     없으면 조직 전체 최근 기록을 조회한다.
+
+    각 run의 session_id로 conversations.channel을 조인해 채워준다
+    (관리자 화면이 채널별로 묶어 보여주기 위해 필요).
     """
 
     query = (
@@ -73,8 +77,26 @@ def list_agent_runs(
         query = query.eq("session_id", session_id)
 
     result = query.execute()
+    runs = result.data or []
 
-    return result.data or []
+    session_ids = list({run["session_id"] for run in runs if run.get("session_id")})
+    channel_by_session: dict[str, str] = {}
+    if session_ids:
+        conversations = (
+            supabase.table("conversations")
+            .select("session_id,channel")
+            .eq("organization_id", organization_id)
+            .in_("session_id", session_ids)
+            .execute()
+        )
+        channel_by_session = {
+            row["session_id"]: row["channel"] for row in (conversations.data or [])
+        }
+
+    for run in runs:
+        run["channel"] = channel_by_session.get(run.get("session_id"))
+
+    return runs
 
 
 def get_agent_run(
@@ -97,4 +119,12 @@ def get_agent_run(
     if not result.data:
         return None
 
-    return result.data[0]
+    run = result.data[0]
+
+    conversation = get_conversation_by_session(
+        organization_id=organization_id,
+        session_id=run["session_id"],
+    )
+    run["channel"] = conversation.get("channel") if conversation else None
+
+    return run
