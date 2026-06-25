@@ -1,6 +1,33 @@
 from typing import Any
 
 
+_COMPARISON_OPERATORS = ["==", "!=", ">=", "<=", ">", "<"]
+
+
+def _parse_literal(value: str) -> Any:
+    normalized = value.strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {"'", '"'}:
+        return normalized[1:-1]
+
+    lowered = normalized.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered in {"null", "none"}:
+        return None
+
+    try:
+        return int(normalized)
+    except ValueError:
+        pass
+
+    try:
+        return float(normalized)
+    except ValueError:
+        return normalized
+
+
 def get_value_by_path(data: dict[str, Any], path: str | None) -> Any:
     """
     예:
@@ -25,6 +52,42 @@ def get_value_by_path(data: dict[str, Any], path: str | None) -> Any:
     return current
 
 
+def evaluate_condition_expression(expression: str | None, variables: dict[str, Any]) -> bool:
+    if not expression or not expression.strip():
+        return True
+
+    normalized = expression.strip()
+
+    for operator in _COMPARISON_OPERATORS:
+        if operator not in normalized:
+            continue
+
+        left, right = normalized.split(operator, 1)
+        actual_value = get_value_by_path(variables, left.strip())
+        expected_value = (
+            get_value_by_path(variables, right.strip())
+            if right.strip().startswith("memory.")
+            else _parse_literal(right)
+        )
+
+        if operator == "==":
+            return actual_value == expected_value
+        if operator == "!=":
+            return actual_value != expected_value
+        if actual_value is None or expected_value is None:
+            return False
+        if operator == ">=":
+            return actual_value >= expected_value
+        if operator == "<=":
+            return actual_value <= expected_value
+        if operator == ">":
+            return actual_value > expected_value
+        if operator == "<":
+            return actual_value < expected_value
+
+    return bool(get_value_by_path(variables, normalized))
+
+
 def evaluate_edge_condition(
     edge: dict[str, Any],
     variables: dict[str, Any],
@@ -37,6 +100,12 @@ def evaluate_edge_condition(
 
     if condition_type == "request_failed":
         return False
+
+    if condition_type == "if":
+        return evaluate_condition_expression(condition_config.get("expression"), variables)
+
+    if condition_type == "fallback":
+        return condition_config.get("fallback") is True
 
     variable_path = condition_config.get("variable")
     expected_value = condition_config.get("value")
