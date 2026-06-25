@@ -11,6 +11,7 @@ from app.graph.nodes.knowledge_node import (
     normalize_knowledge_queries,
 )
 from app.providers.langchain_provider import generate_structured
+from app.tasks.repository import TaskRepository
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,27 @@ FALLBACK_DECISION = DecisionResult(
     knowledge_queries=[],
 )
 
+ACTIVE_TASK_DECISION = DecisionResult(
+    intent="reservation",
+    next_action="run_task",
+    task_type="none",
+    use_knowledge=False,
+    knowledge_queries=[],
+)
+
+
+def _has_active_task_session(organization_id: str, session_id: str) -> bool:
+    try:
+        return (
+            TaskRepository().find_active_session(
+                organization_id=organization_id,
+                session_id=session_id,
+            )
+            is not None
+        )
+    except Exception:
+        return False
+
 
 async def decision_node(state: AgentState) -> dict:
     """
@@ -110,6 +132,24 @@ async def decision_node(state: AgentState) -> dict:
     conversation_history = history_from_state_messages(state.get("messages", []))
     user_message = state["user_message"]
     organization_id = state["organization_id"]
+    session_id = state["session_id"]
+
+    # 진행 중인 task_session이 있으면 join 라우팅(route_after_join)이
+    # 이 노드의 결과를 무시하고 무조건 task로 보낸다. 그 경우 LLM 호출은
+    # 결과가 버려지는 헛수고이므로, 빠른 DB 체크로 건너뛴다.
+    if _has_active_task_session(organization_id, session_id):
+        decision = ACTIVE_TASK_DECISION
+        update: dict = {
+            "intent": decision.intent,
+            "next_action": decision.next_action,
+            "task_type": decision.task_type,
+            "use_knowledge": decision.use_knowledge,
+            "knowledge_queries": decision.knowledge_queries,
+            "should_use_knowledge": decision.use_knowledge,
+            "active_task": "reservation",
+            "task_step": state.get("task_step") or "started",
+        }
+        return update
 
     try:
         decision = await generate_structured(

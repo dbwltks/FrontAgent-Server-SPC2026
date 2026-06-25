@@ -11,7 +11,7 @@ class DynamicTaskRunner:
     def __init__(self, repository: TaskRepository | None = None):
         self.repository = repository or TaskRepository()
 
-    def run(
+    async def run(
         self,
         organization_id: str,
         session_id: str,
@@ -48,9 +48,10 @@ class DynamicTaskRunner:
                 flow_id=flow_id,
             )
 
-        return self._run_session(
+        return await self._run_session(
             task_session=task_session,
             user_message=user_message,
+            organization_id=organization_id,
         )
 
     def _start_session(
@@ -78,10 +79,11 @@ class DynamicTaskRunner:
             variables={},
         )
 
-    def _run_session(
+    async def _run_session(
         self,
         task_session: dict[str, Any],
         user_message: str,
+        organization_id: str,
     ) -> TaskRunResponse:
         flow_id = task_session["flow_id"]
         task_session_id = task_session["id"]
@@ -94,6 +96,10 @@ class DynamicTaskRunner:
         was_waiting_for_input = task_session.get("status") == "waiting_user_input"
 
         max_steps = 20
+
+        # 이번 턴에 거쳐간 노드 경로. 루프 안에서 그 자리에서 채우므로
+        # 별도 DB 조회 없이 대화 로그(metadata)에 그대로 실어 보낼 수 있다.
+        trace: list[dict[str, Any]] = []
 
         for _ in range(max_steps):
             node = self.repository.get_node_by_key(
@@ -111,6 +117,7 @@ class DynamicTaskRunner:
                         "code": "NODE_NOT_FOUND",
                         "message": f"Node not found: {current_node_key}",
                     },
+                    trace=trace,
                 )
 
             user_input_for_current_node = (
@@ -121,15 +128,27 @@ class DynamicTaskRunner:
 
             memory = TaskMemory(variables)
 
-            executor_result = self._execute_node(
+            executor_result = await self._execute_node(
                 node=node,
                 memory=memory,
                 user_message=user_input_for_current_node,
                 is_waiting_input=user_input_for_current_node is not None,
+                organization_id=organization_id,
             )
 
             memory.update(executor_result.memory_updates)
             variables = memory.to_dict()
+
+            trace.append(
+                {
+                    "node_key": current_node_key,
+                    "node_type": node.get("node_type"),
+                    "status": executor_result.status,
+                    "next_behavior": executor_result.next_behavior,
+                    "memory_updates": list(executor_result.memory_updates.keys()),
+                    "error": executor_result.error,
+                }
+            )
 
             if executor_result.next_behavior == "wait_user":
                 self.repository.update_session(
@@ -150,6 +169,7 @@ class DynamicTaskRunner:
                     task_session_id=task_session_id,
                     current_node_key=current_node_key,
                     variables=variables,
+                    trace=trace,
                 )
 
             if executor_result.next_behavior == "complete":
@@ -171,6 +191,7 @@ class DynamicTaskRunner:
                     task_session_id=task_session_id,
                     current_node_key=current_node_key,
                     variables=variables,
+                    trace=trace,
                 )
 
             if executor_result.next_behavior == "handoff":
@@ -192,6 +213,7 @@ class DynamicTaskRunner:
                     task_session_id=task_session_id,
                     current_node_key=current_node_key,
                     variables=variables,
+                    trace=trace,
                 )
 
             if executor_result.next_behavior == "fail":
@@ -223,6 +245,7 @@ class DynamicTaskRunner:
                     variables=variables,
                     error=normalized_error,
                     message=executor_result.message,
+                    trace=trace,
                 )
 
             if self._is_terminal_node_config(node):
@@ -244,6 +267,7 @@ class DynamicTaskRunner:
                     task_session_id=task_session_id,
                     current_node_key=current_node_key,
                     variables=variables,
+                    trace=trace,
                 )
 
             next_node_key = self._resolve_next_node_key(
@@ -270,6 +294,7 @@ class DynamicTaskRunner:
                     variables=variables,
                     error=normalized_error,
                     message=executor_result.message,
+                    trace=trace,
                 )
 
             current_node_key = next_node_key
@@ -299,6 +324,7 @@ class DynamicTaskRunner:
                     task_session_id=task_session_id,
                     current_node_key=current_node_key,
                     variables=variables,
+                    trace=trace,
                 )
 
         return self._mark_failed(
@@ -310,6 +336,7 @@ class DynamicTaskRunner:
                 "code": "MAX_STEPS_EXCEEDED",
                 "message": "Task runner exceeded max steps.",
             },
+            trace=trace,
         )
 
     def _get_next_step_mode(self, node: dict[str, Any]) -> str:
@@ -359,12 +386,13 @@ class DynamicTaskRunner:
             return False
         return self.repository.get_node_by_key(flow_id=flow_id, node_key=node_key) is not None
 
-    def _execute_node(
+    async def _execute_node(
         self,
         node: dict[str, Any],
         memory: TaskMemory,
         user_message: str | None,
         is_waiting_input: bool,
+        organization_id: str,
     ) -> ExecutorResult:
         node_type = node.get("node_type")
 
@@ -381,11 +409,23 @@ class DynamicTaskRunner:
                 },
             )
 
+        # instruction executor만 OpenAI 호출이 있는 async 함수다.
+        # 나머지(message/condition/function)는 동기 함수이므로 그대로 호출한다.
+        if node_type == "instruction":
+            return await executor(
+                node=node,
+                memory=memory,
+                user_message=user_message,
+                is_waiting_input=is_waiting_input,
+                organization_id=organization_id,
+            )
+
         return executor(
             node=node,
             memory=memory,
             user_message=user_message,
             is_waiting_input=is_waiting_input,
+            organization_id=organization_id,
         )
     
     def _move_to_failure_edge_if_exists(
@@ -430,6 +470,7 @@ class DynamicTaskRunner:
         variables: dict[str, Any],
         error: dict[str, Any],
         message: str | None = None,
+        trace: list[dict[str, Any]] | None = None,
     ) -> TaskRunResponse:
         normalized_error = normalize_task_error(
             error,
@@ -458,4 +499,5 @@ class DynamicTaskRunner:
             current_node_key=current_node_key,
             variables=variables,
             error=normalized_error,
+            trace=trace or [],
         )

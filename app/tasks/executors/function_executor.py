@@ -11,6 +11,7 @@ def execute_function_node(
     memory: TaskMemory,
     user_message: str | None = None,
     is_waiting_input: bool = False,
+    organization_id: str | None = None,
 ) -> ExecutorResult:
     config = node.get("config") or {}
 
@@ -50,6 +51,11 @@ def execute_function_node(
             value=raw_params,
             memory=memory,
         )
+
+        # config.params에 organization_id를 명시하지 않은 함수 노드는
+        # 현재 세션의 organization_id를 자동으로 채워준다.
+        if organization_id and "organization_id" not in resolved_params:
+            resolved_params = {**resolved_params, "organization_id": organization_id}
 
         function_result = registered_function.handler(
             resolved_params,

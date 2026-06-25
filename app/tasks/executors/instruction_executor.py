@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.tasks.edge_evaluator import get_value_by_path
@@ -11,7 +11,7 @@ from app.tasks.memory import TaskMemory
 from app.tasks.types import ExecutorResult
 
 
-client = OpenAI(api_key=settings.openai_api_key)
+client = AsyncOpenAI(api_key=settings.openai_api_key)
 
 _WEEKDAY_KO = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
 
@@ -146,11 +146,12 @@ Current User Message:
 """.strip()
 
 
-def execute_instruction_node(
+async def execute_instruction_node(
     node: dict[str, Any],
     memory: TaskMemory,
     user_message: str | None = None,
     is_waiting_input: bool = False,
+    organization_id: str | None = None,
 ) -> ExecutorResult:
     config = node.get("config") or {}
 
@@ -187,7 +188,7 @@ def execute_instruction_node(
     )
 
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=getattr(settings, "openai_model", "gpt-4.1-mini"),
             messages=[
                 {
