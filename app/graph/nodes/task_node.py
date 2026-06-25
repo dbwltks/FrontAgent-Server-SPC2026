@@ -1,6 +1,8 @@
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from langgraph.config import get_stream_writer
+
 from app.graph.state import AgentState
 from app.tasks.repository import TaskRepository
 from app.tasks.runner import DynamicTaskRunner
@@ -46,6 +48,7 @@ async def task_node(state: AgentState) -> dict:
     )
 
     flow_id = None
+    writer = get_stream_writer()
 
     if active_session is None:
         task_type = state.get("task_type")
@@ -98,6 +101,12 @@ async def task_node(state: AgentState) -> dict:
         session_id=session_id,
         user_message=user_message,
         flow_id=flow_id,
+        on_trace=lambda item: writer(
+            {
+                "type": "task_step",
+                "step": item,
+            }
+        ),
     )
 
     task_result = _task_response_to_dict(task_response)

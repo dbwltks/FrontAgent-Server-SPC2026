@@ -70,11 +70,13 @@ def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
 
     if node_name == "task":
         task_result = node_state.get("task_result") or {}
+        task_trace = task_result.get("trace") or []
 
         return (
             f"status={task_result.get('status')} / "
-            f"current_node={task_result.get('current_node_key')}",
-            [task_result],
+            f"current_node={task_result.get('current_node_key')} / "
+            f"steps={len(task_trace)}",
+            task_trace,
         )
 
     if node_name == "knowledge":
@@ -164,6 +166,23 @@ async def stream_chat_response(req: ChatRequest):
                         "knowledge_start",
                         {
                             "queries": chunk.get("queries", []),
+                            "elapsed_ms": elapsed_ms_since(started_at),
+                        },
+                    )
+                elif chunk.get("type") == "task_step":
+                    step = chunk.get("step") or {}
+                    label = step.get("node_label") or step.get("node_key") or "태스크 단계"
+                    yield sse_event(
+                        "trace",
+                        {
+                            "step": "task",
+                            "status": "step",
+                            "detail": (
+                                f"{label} / "
+                                f"type={step.get('node_type')} / "
+                                f"next={step.get('next_behavior')}"
+                            ),
+                            "items": [step],
                             "elapsed_ms": elapsed_ms_since(started_at),
                         },
                     )
