@@ -24,6 +24,7 @@ from app.api.chat import (
 from app.core.config import settings
 from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
 from app.repositories.ai_usage_repo import create_usage_log_background
+from app.repositories.conversation_repo import end_call_conversation
 from app.repositories.organization_ai_settings_repo import get_ai_settings
 
 
@@ -1223,3 +1224,34 @@ async def create_realtime_call(
         content=openai_response.text,
         media_type="application/sdp",
     )
+
+
+class CallEndRequest(BaseModel):
+    organization_id: str
+    session_id: str
+
+
+@router.post("/call/end")
+async def end_voice_call(payload: CallEndRequest):
+    """
+    클라이언트가 통화를 끊을 때 호출한다. call_started_at이 있는 통화 채널
+    상담방에 call_ended_at/call_duration_seconds를 기록한다.
+
+    클라이언트가 비정상 종료(새로고침, 강제 종료 등)되어 이 엔드포인트가
+    호출되지 못하면 duration이 기록되지 않을 수 있다 — 통화 목록 화면에서는
+    call_ended_at이 없는 항목을 "진행 중"으로 표시해 구분한다.
+    """
+    conversation = end_call_conversation(
+        organization_id=payload.organization_id,
+        session_id=payload.session_id,
+    )
+
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    return {
+        "conversation_id": conversation.get("id"),
+        "call_started_at": conversation.get("call_started_at"),
+        "call_ended_at": conversation.get("call_ended_at"),
+        "call_duration_seconds": conversation.get("call_duration_seconds"),
+    }
