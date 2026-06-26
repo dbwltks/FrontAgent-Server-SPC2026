@@ -1,6 +1,8 @@
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.core.config import settings
 from app.repositories.organization_ai_settings_repo import (
     ALLOWED_STT_PROVIDERS,
     ALLOWED_TTS_PROVIDERS,
@@ -25,7 +27,9 @@ router = APIRouter(
 # 선택 가능한 모델/보이스 같은 비밀 아닌 옵션은 여기서 관리한다.
 STT_MODELS_BY_PROVIDER = {
     "openai": ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
-    "clova": [],  # CLOVA Speech는 모델 선택이 없고 provider 자체가 엔진이다.
+    # CLOVA Speech는 모델 파라미터가 없어 provider 자체가 엔진이지만,
+    # 프론트 드롭다운이 빈 목록을 받지 않도록 단일 옵션으로 표시한다.
+    "clova": ["clova-speech"],
 }
 
 TTS_MODELS_BY_PROVIDER = {
@@ -46,6 +50,8 @@ TTS_VOICES_BY_MODEL = {
 REALTIME_MODELS = ["gpt-realtime-2"]
 # Realtime은 tts-1/gpt-4o-mini-tts와 보이스 목록이 다르다(fable/nova/onyx 없음, ballad/verse 있음).
 REALTIME_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+
+ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v2/voices"
 
 
 class OrganizationAISettingsUpdateRequest(BaseModel):
@@ -116,6 +122,50 @@ def normalize_update_data(req: OrganizationAISettingsUpdateRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc))
 
     return raw
+
+
+@router.get("/elevenlabs-voices")
+async def list_elevenlabs_voices(search: str | None = None):
+    """
+    ElevenLabs는 보이스가 계정마다 다르고 voice_id가 고정 영문 코드가 아니라,
+    실제 호출 가능한 목록을 코드에 하드코딩할 수 없다. 그래서 ElevenLabs API를
+    그대로 중계해 프론트가 실시간으로 선택지를 받게 한다.
+    """
+    if not settings.elevenlabs_api_key:
+        raise HTTPException(status_code=500, detail="ElevenLabs is not configured")
+
+    params = {"page_size": 100}
+    if search:
+        params["search"] = search
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(
+                ELEVENLABS_VOICES_URL,
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                params=params,
+            )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Failed to fetch ElevenLabs voices")
+
+    if not response.is_success:
+        raise HTTPException(
+            status_code=502,
+            detail=f"ElevenLabs voices request failed: {response.text[:300]}",
+        )
+
+    data = response.json()
+    voices = [
+        {
+            "voice_id": voice.get("voice_id"),
+            "name": voice.get("name"),
+            "language": (voice.get("labels") or {}).get("language"),
+            "accent": (voice.get("labels") or {}).get("accent"),
+            "description": (voice.get("labels") or {}).get("description"),
+        }
+        for voice in data.get("voices", [])
+    ]
+    return {"voices": voices, "total_count": data.get("total_count", len(voices))}
 
 
 @router.get("")
