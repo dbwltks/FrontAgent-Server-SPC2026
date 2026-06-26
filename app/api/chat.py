@@ -4,9 +4,10 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.repositories.organization_repo import resolve_organization_id
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
     AI_DISABLED_MESSAGE,
@@ -23,12 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
-    organization_id: str = Field(..., example="org_test")
+    organization_id: str = Field(..., example="a55c98f9-74ba-40d8-bc9d-bc3f1c0870da")
     session_id: str = Field(..., example="chat_test")
     message: str = Field(..., example="안녕하세요")
     folder_id: str | None = None
     stream: bool = True
     channel: Literal["web_chat", "web_call", "voice"] = "web_chat"
+
+    @field_validator("organization_id")
+    @classmethod
+    def _resolve_organization_id(cls, value: str) -> str:
+        return resolve_organization_id(value)
 
 
 class ChatResponse(BaseModel):
