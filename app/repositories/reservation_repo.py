@@ -59,6 +59,152 @@ def get_service(organization_id: str, service_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def create_service(
+    organization_id: str,
+    name: str,
+    duration_minutes: int,
+    description: str | None = None,
+    is_active: bool = True,
+    is_reservable: bool = True,
+) -> dict:
+    """
+    예약 가능한 서비스를 생성합니다.
+
+    관리자 화면에서 사장님이 새 예약 서비스를 등록할 때 사용합니다.
+    """
+    if not name or not name.strip():
+        raise ReservationRepoError("Service name is required")
+
+    if duration_minutes <= 0:
+        raise ReservationRepoError("duration_minutes must be greater than 0")
+
+    insert_data = {
+        "organization_id": organization_id,
+        "name": name.strip(),
+        "duration_minutes": duration_minutes,
+        "description": description,
+        "is_active": is_active,
+        "is_reservable": is_reservable,
+    }
+
+    result = supabase.table("services").insert(insert_data).execute()
+    rows = result.data or []
+
+    if not rows:
+        raise ReservationRepoError("Failed to create service")
+
+    return rows[0]
+
+
+def update_service(
+    organization_id: str,
+    service_id: str,
+    update_data: dict,
+) -> dict:
+    """
+    예약 서비스를 수정합니다.
+
+    수정 가능한 값:
+    - name
+    - description
+    - duration_minutes
+    - is_active
+    - is_reservable
+    """
+    service = get_service(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    if not service:
+        raise NotFoundError("Service not found")
+
+    allowed_fields = {
+        "name",
+        "description",
+        "duration_minutes",
+        "is_active",
+        "is_reservable",
+    }
+
+    data = {
+        key: value
+        for key, value in update_data.items()
+        if key in allowed_fields and value is not None
+    }
+
+    if not data:
+        raise ReservationRepoError("No fields to update")
+
+    if "name" in data and not str(data["name"]).strip():
+        raise ReservationRepoError("Service name is required")
+
+    if "name" in data:
+        data["name"] = str(data["name"]).strip()
+
+    if "duration_minutes" in data and int(data["duration_minutes"]) <= 0:
+        raise ReservationRepoError("duration_minutes must be greater than 0")
+
+    result = (
+        supabase.table("services")
+        .update(data)
+        .eq("organization_id", organization_id)
+        .eq("id", service_id)
+        .execute()
+    )
+
+    rows = result.data or []
+
+    if not rows:
+        raise ReservationRepoError("Failed to update service")
+
+    return rows[0]
+
+
+def delete_service(
+    organization_id: str,
+    service_id: str,
+) -> dict:
+    """
+    예약 서비스를 삭제합니다.
+
+    실제 삭제하지 않고 비활성화합니다.
+    이유:
+    - 기존 reservations.service_id 참조 보존
+    - 과거 예약 내역 조회 가능
+    - 신규 예약 목록에서는 제외
+    """
+    service = get_service(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    if not service:
+        raise NotFoundError("Service not found")
+
+    result = (
+        supabase.table("services")
+        .update(
+            {
+                "is_active": False,
+                "is_reservable": False,
+            }
+        )
+        .eq("organization_id", organization_id)
+        .eq("id", service_id)
+        .execute()
+    )
+
+    rows = result.data or []
+
+    if not rows:
+        raise ReservationRepoError("Failed to delete service")
+
+    return rows[0]
+
+
+
+
 def find_conflicting_reservations(
     organization_id: str,
     start_at: datetime,
@@ -278,6 +424,9 @@ def create_reservation(
 
     if not service:
         raise NotFoundError("Service not found")
+    
+    if service.get("is_active") is False or service.get("is_reservable") is False:
+        raise ReservationRepoError("Service is not reservable")
 
     if start_at >= end_at:
         raise ReservationRepoError("start_at must be earlier than end_at")

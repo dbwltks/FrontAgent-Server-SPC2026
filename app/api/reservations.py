@@ -14,12 +14,15 @@ from app.repositories.reservation_repo import (
     cancel_reservation,
     confirm_reservation,
     create_reservation,
+    create_service,
+    delete_service,
     get_available_slots,
     get_reservation,
     get_service,
     list_reservations,
     list_services,
     reject_reservation,
+    update_service,
 )
 from app.services.reservation_calendar_sync_service import (
     sync_cancelled_reservation_to_calendar,
@@ -75,6 +78,57 @@ class ReservationCreateRequest(BaseModel):
     memo: str | None = Field(
         default=None,
         example="방문 청소 희망",
+    )
+
+class ServiceCreateRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        examples=["00000000-0000-0000-0000-000000000000"],
+    )
+    name: str = Field(
+        ...,
+        example="프리미엄 청소",
+    )
+    description: str | None = Field(
+        default=None,
+        example="전문 장비를 사용하는 프리미엄 청소 서비스",
+    )
+    duration_minutes: int = Field(
+        ...,
+        gt=0,
+        example=90,
+    )
+    is_active: bool = Field(
+        default=True,
+        example=True,
+    )
+    is_reservable: bool = Field(
+        default=True,
+        example=True,
+    )
+
+
+class ServiceUpdateRequest(BaseModel):
+    name: str | None = Field(
+        default=None,
+        example="프리미엄 청소",
+    )
+    description: str | None = Field(
+        default=None,
+        example="전문 장비를 사용하는 프리미엄 청소 서비스",
+    )
+    duration_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        example=90,
+    )
+    is_active: bool | None = Field(
+        default=None,
+        example=True,
+    )
+    is_reservable: bool | None = Field(
+        default=None,
+        example=True,
     )
 
 
@@ -172,6 +226,99 @@ def list_services_api(
             "count": len(items),
             "items": items,
         }
+    except Exception as error:
+        _handle_repo_error(error)
+
+
+@router.post("/services")
+def create_service_api(
+    request: ServiceCreateRequest,
+) -> dict[str, Any]:
+    """
+    예약 서비스를 생성한다.
+
+    관리자 화면에서 사장님이 새 예약 상품/서비스를 등록할 때 사용한다.
+    """
+    try:
+        service = create_service(
+            organization_id=request.organization_id,
+            name=request.name,
+            description=request.description,
+            duration_minutes=request.duration_minutes,
+            is_active=request.is_active,
+            is_reservable=request.is_reservable,
+        )
+
+        return {
+            "id": service["id"],
+            "message": "서비스가 생성되었습니다.",
+            "service": service,
+        }
+
+    except Exception as error:
+        _handle_repo_error(error)
+
+@router.patch("/services/{service_id}")
+def update_service_api(
+    service_id: str,
+    request: ServiceUpdateRequest,
+    organization_id: str = Query(
+        ...,
+        examples=["00000000-0000-0000-0000-000000000000"],
+    ),
+) -> dict[str, Any]:
+    """
+    예약 서비스를 수정한다.
+    """
+    update_data = request.model_dump(
+        exclude_unset=True,
+        exclude_none=True,
+    )
+
+    try:
+        service = update_service(
+            organization_id=organization_id,
+            service_id=service_id,
+            update_data=update_data,
+        )
+
+        return {
+            "id": service["id"],
+            "message": "서비스가 수정되었습니다.",
+            "service": service,
+        }
+
+    except Exception as error:
+        _handle_repo_error(error)
+
+
+@router.delete("/services/{service_id}")
+def delete_service_api(
+    service_id: str,
+    organization_id: str = Query(
+        ...,
+        examples=["00000000-0000-0000-0000-000000000000"],
+    ),
+) -> dict[str, Any]:
+    """
+    예약 서비스를 삭제한다.
+
+    실제 DB row를 삭제하지 않고,
+    is_active=false, is_reservable=false 로 변경한다.
+    """
+    try:
+        service = delete_service(
+            organization_id=organization_id,
+            service_id=service_id,
+        )
+
+        return {
+            "id": service["id"],
+            "deleted": True,
+            "message": "서비스가 삭제되었습니다.",
+            "service": service,
+        }
+
     except Exception as error:
         _handle_repo_error(error)
 
