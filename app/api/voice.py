@@ -85,6 +85,7 @@ async def voice_config(organization_id: str | None = None):
             "organization_id": organization_id,
             "enabled": ai_settings.get("voice_enabled", True),
             "mode": get_voice_mode(organization_id),
+            "stt_provider": ai_settings.get("voice_stt_provider") or settings.stt_provider,
             "stt_model": ai_settings.get("voice_stt_model"),
             "tts_provider": resolve_tts_config(ai_settings)["provider"],
             "tts_model": ai_settings.get("voice_tts_model"),
@@ -97,6 +98,7 @@ async def voice_config(organization_id: str | None = None):
 
     return {
         "mode": get_voice_mode(),
+        "stt_provider": settings.stt_provider,
         "stt_model": settings.voice_stt_model,
         "tts_model": settings.voice_tts_model,
         "tts_voice": settings.voice_tts_voice,
@@ -111,6 +113,9 @@ async def transcribe_audio(
     session_id: str | None = Query(None),
 ):
     ai_settings = get_ai_settings(organization_id) if organization_id else None
+    stt_provider = (
+        ai_settings.get("voice_stt_provider") if ai_settings else settings.stt_provider
+    ) or "openai"
     stt_model = (
         ai_settings.get("voice_stt_model")
         if ai_settings
@@ -123,6 +128,7 @@ async def transcribe_audio(
         filename=audio.filename,
         content_type=audio.content_type,
         model=stt_model,
+        provider=stt_provider,
     )
 
     if organization_id:
@@ -132,7 +138,7 @@ async def transcribe_audio(
                 "session_id": session_id,
                 "channel": "web_call",
                 "feature": "stt",
-                "provider": "openai",
+                "provider": stt_provider,
                 "model": stt_model,
                 "audio_bytes": len(content),
                 "text_chars": len(text),
@@ -192,6 +198,7 @@ async def process_voice_turn(
         raise HTTPException(status_code=409, detail="Voice is disabled")
 
     content = await read_audio_upload(audio)
+    stt_provider = ai_settings.get("voice_stt_provider") or settings.stt_provider
     stt_model = ai_settings.get("voice_stt_model") or settings.voice_stt_model
     tts_config = resolve_tts_config(ai_settings)
     tts_provider, tts_log_model = tts_log_fields(tts_config)
@@ -201,6 +208,7 @@ async def process_voice_turn(
         filename=audio.filename,
         content_type=audio.content_type,
         model=stt_model,
+        provider=stt_provider,
     )
     create_usage_log_background(
         {
@@ -208,7 +216,7 @@ async def process_voice_turn(
             "session_id": session_id,
             "channel": "web_call",
             "feature": "stt",
-            "provider": "openai",
+            "provider": stt_provider,
             "model": stt_model,
             "audio_bytes": len(content),
             "text_chars": len(transcript),

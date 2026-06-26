@@ -8,6 +8,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+CLOVA_SPEECH_LANG = "Kor"
 
 SUPPORTED_TRANSCRIPTION_UPLOADS = {
     "audio/flac": ("utterance.flac", "audio/flac"),
@@ -48,23 +49,69 @@ async def read_audio_upload(audio: UploadFile) -> bytes:
     return content
 
 
+async def _transcribe_clova(content: bytes) -> str:
+    if not settings.clova_speech_api_url or not settings.clova_speech_api_secret:
+        logger.error("CLOVA Speech API URL/secret is not configured")
+        raise HTTPException(status_code=500, detail="CLOVA Speech is not configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                settings.clova_speech_api_url,
+                params={"lang": CLOVA_SPEECH_LANG},
+                headers={
+                    "X-CLOVASPEECH-API-KEY": settings.clova_speech_api_secret,
+                    "Content-Type": "application/octet-stream",
+                },
+                content=content,
+            )
+    except httpx.HTTPError:
+        logger.exception("CLOVA Speech transcription request failed")
+        raise HTTPException(status_code=502, detail="Voice transcription failed")
+
+    if not response.is_success:
+        logger.error(
+            "CLOVA Speech transcription rejected request: status=%s body=%s",
+            response.status_code,
+            response.text[:1000],
+        )
+        raise HTTPException(status_code=502, detail="Voice transcription failed")
+
+    return str(response.json().get("text", "")).strip()
+
+
 async def transcribe_audio_content(
     *,
     content: bytes,
     filename: str | None,
     content_type: str | None,
     model: str,
+    provider: str = "openai",
 ) -> tuple[str, dict]:
     upload_filename, upload_content_type = normalize_transcription_upload(content_type)
     logger.info(
-        "transcription upload received: filename=%s content_type=%s normalized_filename=%s normalized_content_type=%s bytes=%s model=%s",
+        "transcription upload received: filename=%s content_type=%s normalized_filename=%s normalized_content_type=%s bytes=%s model=%s provider=%s",
         filename,
         content_type,
         upload_filename,
         upload_content_type,
         len(content),
         model,
+        provider,
     )
+
+    metadata = {
+        "filename": filename,
+        "content_type": content_type,
+        "normalized_filename": upload_filename,
+        "normalized_content_type": upload_content_type,
+    }
+
+    if provider == "clova":
+        text = await _transcribe_clova(content)
+        if not text:
+            raise HTTPException(status_code=422, detail="No speech was detected")
+        return text, metadata
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -108,10 +155,4 @@ async def transcribe_audio_content(
     if not text:
         raise HTTPException(status_code=422, detail="No speech was detected")
 
-    metadata = {
-        "filename": filename,
-        "content_type": content_type,
-        "normalized_filename": upload_filename,
-        "normalized_content_type": upload_content_type,
-    }
     return text, metadata

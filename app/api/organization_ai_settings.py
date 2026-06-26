@@ -2,12 +2,14 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.repositories.organization_ai_settings_repo import (
+    ALLOWED_STT_PROVIDERS,
     ALLOWED_TTS_PROVIDERS,
     ALLOWED_VOICE_MODES,
     ALLOWED_VOICE_RESPONSE_STYLES,
     get_ai_settings,
     update_ai_settings,
     validate_model_name,
+    validate_stt_provider,
     validate_tts_provider,
     validate_voice_mode,
     validate_voice_response_style,
@@ -26,6 +28,7 @@ class OrganizationAISettingsUpdateRequest(BaseModel):
     decision_model: str | None = Field(default=None, example="gpt-4.1-mini")
     voice_enabled: bool | None = None
     voice_mode: str | None = Field(default=None, example="pipeline")
+    voice_stt_provider: str | None = Field(default=None, example="openai")
     voice_stt_model: str | None = Field(default=None, example="gpt-4o-mini-transcribe")
     voice_tts_provider: str | None = Field(default=None, example="openai")
     voice_tts_model: str | None = Field(default=None, example="gpt-4o-mini-tts")
@@ -70,6 +73,9 @@ def normalize_update_data(req: OrganizationAISettingsUpdateRequest) -> dict:
             if field in raw:
                 raw[field] = validate_model_name(raw[field], field)
 
+        if "voice_stt_provider" in raw:
+            raw["voice_stt_provider"] = validate_stt_provider(raw["voice_stt_provider"])
+
         if "voice_tts_provider" in raw:
             raw["voice_tts_provider"] = validate_tts_provider(raw["voice_tts_provider"])
 
@@ -93,12 +99,14 @@ def get_organization_ai_settings(organization_id: str):
         "settings": get_ai_settings(organization_id),
         "options": {
             "voice_modes": sorted(ALLOWED_VOICE_MODES),
+            "stt_providers": sorted(ALLOWED_STT_PROVIDERS),
             "tts_providers": sorted(ALLOWED_TTS_PROVIDERS),
             "voice_response_styles": sorted(ALLOWED_VOICE_RESPONSE_STYLES),
             "recommended_templates": [
                 {
                     "name": "저비용 Pipeline",
                     "voice_mode": "pipeline",
+                    "voice_stt_provider": "openai",
                     "voice_stt_model": "gpt-4o-mini-transcribe",
                     "voice_tts_provider": "openai",
                     "voice_tts_model": "gpt-4o-mini-tts",
@@ -108,10 +116,20 @@ def get_organization_ai_settings(organization_id: str):
                 {
                     "name": "자연스러운 한국어 (ElevenLabs)",
                     "voice_mode": "pipeline",
+                    "voice_stt_provider": "openai",
                     "voice_stt_model": "gpt-4o-transcribe",
                     "voice_tts_provider": "elevenlabs",
                     "elevenlabs_model": "eleven_flash_v2_5",
                     "elevenlabs_voice_id": "",
+                    "voice_response_style": "friendly_short",
+                },
+                {
+                    "name": "CLOVA Speech (한국어 STT)",
+                    "voice_mode": "pipeline",
+                    "voice_stt_provider": "clova",
+                    "voice_tts_provider": "openai",
+                    "voice_tts_model": "gpt-4o-mini-tts",
+                    "voice_tts_voice": "marin",
                     "voice_response_style": "friendly_short",
                 },
                 {
