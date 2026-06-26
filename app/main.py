@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.graph.graph_runtime import lifespan_graph
@@ -24,6 +25,14 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     lifespan=lifespan_graph,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://front-agent-ai.vercel.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # 기본 상태 확인 API
