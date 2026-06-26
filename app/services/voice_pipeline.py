@@ -83,6 +83,7 @@ async def stream_pipeline_voice_turn_events(
     """
 
     started_at = time.perf_counter()
+    stt_provider = ai_settings.get("voice_stt_provider") or settings.stt_provider
     stt_model = ai_settings.get("voice_stt_model") or settings.voice_stt_model
     tts_config = resolve_tts_config(ai_settings)
     tts_provider, tts_log_model = tts_log_fields(tts_config)
@@ -98,6 +99,7 @@ async def stream_pipeline_voice_turn_events(
             filename=filename,
             content_type=content_type,
             model=stt_model,
+            provider=stt_provider,
         )
         yield sse_event(
             "transcript",
@@ -113,7 +115,7 @@ async def stream_pipeline_voice_turn_events(
                 "session_id": session_id,
                 "channel": "web_call",
                 "feature": "stt",
-                "provider": "openai",
+                "provider": stt_provider,
                 "model": stt_model,
                 "audio_bytes": len(content),
                 "text_chars": len(transcript),
