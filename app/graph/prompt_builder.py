@@ -62,14 +62,38 @@ def build_task_context_text(
     active_task: str | None,
     task_step: str | None,
     task_result: dict | None = None,
+    has_active_task: bool = False,
+    task_route: str | None = None,
+    task_route_reason: str | None = None,
+    pending_task_prompt: str | None = None,
+    current_task_node_key: str | None = None,
 ) -> str:
     """메시지 히스토리로 표현되지 않는 진행 중/완료 Task 상태를 만든다."""
     lines: list[str] = []
 
-    if active_task:
-        lines.append(f"진행 중인 Task: {active_task}\n현재 단계: {task_step or '미정'}")
+    if has_active_task or active_task:
+        lines.append(
+            "\n".join(
+                [
+                    "진행 중인 Task가 있습니다.",
+                    f"- 진행 중인 Task: {active_task or '미정'}",
+                    f"- 현재 단계: {task_step or current_task_node_key or '미정'}",
+                    f"- 현재 노드: {current_task_node_key or '미정'}",
+                    f"- 사용자가 답해야 하는 질문: {pending_task_prompt or '미정'}",
+                ]
+            )
+        )
     else:
         lines.append("진행 중인 Task가 없습니다.")
+
+    if task_route:
+        route_lines = [
+            "이번 턴의 태스크 라우터 판단:",
+            f"- route: {task_route}",
+        ]
+        if task_route_reason:
+            route_lines.append(f"- 판단 이유: {task_route_reason}")
+        lines.append("\n".join(route_lines))
 
     if task_result:
         status = task_result.get("status")
@@ -82,14 +106,16 @@ def build_task_context_text(
             f"- 처리 여부: {'처리됨' if handled else '처리되지 않음'}",
             f"- 상태: {status or '알 수 없음'}",
         ]
+
         if message:
             result_lines.append(f"- Task 실행기가 만든 결과 메시지: {message}")
+
         if error.get("message"):
             result_lines.append(f"- 실패 사유: {error['message']}")
+
         lines.append("\n".join(result_lines))
 
     return "\n\n".join(lines)
-
 
 def build_response_instructions(
     intent: str | None,
@@ -99,6 +125,11 @@ def build_response_instructions(
     active_task: str | None = None,
     task_step: str | None = None,
     task_result: dict | None = None,
+    has_active_task: bool = False,
+    task_route: str | None = None,
+    task_route_reason: str | None = None,
+    pending_task_prompt: str | None = None,
+    current_task_node_key: str | None = None,
     rules: list[dict] | None = None,
     channel: str = "web_chat",
     voice_response_style: str = "friendly_short",
@@ -112,7 +143,16 @@ def build_response_instructions(
     Knowledge 검색이 필요한 요청에만 추가한다.
     """
     rules_text = build_rule_instructions_text(rules)
-    task_context = build_task_context_text(active_task, task_step, task_result)
+    task_context = build_task_context_text(
+        active_task=active_task,
+        task_step=task_step,
+        task_result=task_result,
+        has_active_task=has_active_task,
+        task_route=task_route,
+        task_route_reason=task_route_reason,
+        pending_task_prompt=pending_task_prompt,
+        current_task_node_key=current_task_node_key,
+    )
     is_voice_channel = channel in {"web_call", "voice"}
 
     if is_voice_channel:
@@ -198,6 +238,30 @@ intent: {intent or 'unknown'}
 - 여러 하위 질문이 있으면 각 질문에 해당하는 검색 결과를 구분해 답한다.
 - 일부 질문만 근거가 있으면 확인된 부분만 답하고, 나머지는 확인이 필요하다고 안내한다.
 - 필요한 정보를 찾지 못했다면 해당 정보를 확인하지 못했다고 명확히 안내한다."""
+        )
+
+    if has_active_task and task_route == "search_knowledge":
+        sections.append(
+            f"""[태스크 중 지식 질문 처리]
+- 사용자는 현재 태스크 진행 중에 추가 정보 질문을 했다.
+- 먼저 검색된 지식을 바탕으로 사용자의 질문에 답한다.
+- 답변 후 진행 중인 태스크가 취소되거나 완료된 것처럼 말하지 않는다.
+- 사용자가 예약을 계속할 수 있도록 원래 단계로 자연스럽게 돌아간다.
+- 현재 사용자가 답해야 하는 질문은 다음과 같다: {pending_task_prompt or '이전 예약 단계의 질문'}
+- 마지막에는 위 질문을 짧고 자연스럽게 다시 안내한다.
+- 예: "예약을 계속하려면 원하시는 서비스를 선택해 주세요."
+"""
+        )
+
+    if has_active_task and task_route == "check_availability":
+        sections.append(
+            f"""[태스크 중 예약 가능 시간 질문 처리]
+    - 사용자는 예약 태스크 진행 중에 예약 가능한 시간이나 가장 빠른 시간을 물었다.
+    - 아직 예약 가능 시간 조회 전용 실행 노드가 연결되어 있지 않다면, 임의로 시간을 만들어내지 않는다.
+    - 필요한 선행 정보가 부족하면 어떤 정보가 필요한지 짧게 물어본다.
+    - 현재 사용자가 답해야 하는 질문은 다음과 같다: {pending_task_prompt or '예약 진행에 필요한 정보'}
+    - 예: "가능한 시간을 확인하려면 먼저 원하시는 서비스를 선택해 주세요."
+    """
         )
 
     return "\n\n".join(sections)

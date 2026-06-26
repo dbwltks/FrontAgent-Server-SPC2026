@@ -30,6 +30,23 @@ class AgentState(TypedDict):
     active_task: Optional[str]
     task_step: Optional[str]
 
+
+    # 진행 중 태스크의 상세 컨텍스트
+    # task_router_node가 "태스크 입력값인지 / 지식 질문인지 / 예약 가능 시간 질문인지" 판단할 때 사용한다.
+    active_task_session: Optional[Dict[str, Any]]
+    current_task_node: Optional[Dict[str, Any]]
+    current_task_flow_id: Optional[str]
+    current_task_node_key: Optional[str]
+    current_task_node_type: Optional[str]
+    pending_task_prompt: Optional[str]
+
+    # 태스크 진행 중 전용 LLM router 결과
+    # 예: continue_task, search_knowledge, check_availability, handoff, need_clarification
+    task_route: Optional[str]
+    task_route_confidence: Optional[float]
+    task_route_reason: Optional[str]
+
+    
     # Decision Node에서 분류한 intent
     # 예: pricing, reservation, handoff, faq, general, end_session
     intent: Optional[str]

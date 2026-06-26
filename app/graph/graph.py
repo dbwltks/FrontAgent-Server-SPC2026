@@ -12,42 +12,27 @@ from app.graph.nodes.response_node import response_node
 from app.graph.nodes.end_session_node import end_session_node
 from app.graph.nodes.save_ai_message_node import save_ai_message_node
 from app.graph.nodes.save_agent_run_node import save_agent_run_node
+from app.graph.nodes.task_router_node import task_router_node
 
 
-def route_after_join(state: AgentState) -> str:
+def route_after_conversation(state: AgentState) -> str:
     """
-    conversation/decision/rule 병렬 브랜치가 끝난 뒤 다음 노드를 결정한다.
-
-    우선순위:
-    1. AI 자동응답 꺼짐 → ai_handoff
-    2. 진행 중 task_session이 있어도, decision_node가 이번 메시지를 명확히
-       지식 질문(search_knowledge)으로 판단했으면 그쪽을 우선한다.
-       예: 예약 슬롯필링 도중 "강아지 데려가도 되나요?" 같은 질문은
-       task로 흘려보내면 안 된다. 그 외(슬롯 답변처럼 애매한 단답 등)는
-       기존대로 task_session을 우선해 진행한다.
-    3. 진행 중 task_session 있음 → task (conversation_node가 미리 조회한 플래그)
-    4. decision_node 결과에 따라 task / knowledge / response
+    conversation_node 실행 후,
+    진행 중 태스크가 있으면 task_router_node로 보내고
+    없으면 기존 decision_node로 보낸다.
     """
     if not state.get("ai_enabled", True):
         return "ai_handoff"
 
-    if state.get("next_action") == "end_session":
-        return "response"
-
     if state.get("has_active_task", False):
-        if state.get("next_action") == "search_knowledge":
-            return "knowledge"
-        return "task"
+        return "task_router"
 
-    return route_after_decision(state)
+    return "decision"
 
 
 def route_after_decision(state: AgentState) -> str:
     """
-    decision_node가 결정한 next_action에 따라 다음 노드를 선택한다.
-
-    rules는 START에서 병렬로 이미 조회되므로 별도 rule 단계를 거치지 않고
-    knowledge 또는 곧바로 response로 분기한다.
+    decision_node 또는 task_router_node가 결정한 next_action에 따라 다음 노드를 선택한다.
     """
     next_action = state.get("next_action")
 
@@ -57,35 +42,30 @@ def route_after_decision(state: AgentState) -> str:
     if next_action == "search_knowledge":
         return "knowledge"
 
+    if next_action == "handoff":
+        return "ai_handoff"
+
+    if next_action == "check_availability":
+        return "response"
+
+    if next_action == "end_session":
+        return "response"
+
     return "response"
-
-
-def join_after_conversation_and_decision(state: AgentState) -> AgentState:
-    """
-    conversation/decision 두 병렬 브랜치가 합류하는 지점.
-    두 노드 모두 state를 직접 채우므로 추가 가공 없이 그대로 통과시킨다.
-    """
-    return state
 
 
 def build_graph(checkpointer=None):
     """
     Front Agent의 LangGraph 흐름을 만든다.
 
-    흐름:
-    1. 상담방 생성/조회 + 고객 메시지 저장 (messages에도 추가)
-       와 decision_node의 intent / next_action / task_type / knowledge_queries 판단을
-       병렬로 실행한다 (서로의 결과를 필요로 하지 않음).
-    2. join에서 ai_enabled가 꺼져 있으면 ai_handoff로 바로 종료,
-       아니면 decision 결과로 분기.
-    3. next_action이 search_knowledge면 Knowledge 검색 (질문 분해는 decision_node 결과 재사용)
-    4. rules 조회
-    5. AI 응답 생성 (messages에도 추가)
-    6. AI 메시지 저장
-    7. Agent Run Log 저장
-
-    멀티턴 메모리(직전 대화 맥락)는 checkpointer가 thread_id 기준으로
-    state["messages"]를 자동 영속화/복원하므로 별도 조회 노드가 필요 없다.
+    변경된 흐름:
+    1. conversation_node가 상담방 생성/조회, 고객 메시지 저장, active task context 조회를 수행한다.
+    2. 진행 중 태스크가 있으면 task_router_node로 간다.
+    3. 진행 중 태스크가 없으면 기존 decision_node로 간다.
+    4. rule_node는 decision/task_router 이후에 실행한다.
+       - 병렬 join을 제거해서 intent, next_action 같은 key의 concurrent update를 막는다.
+    5. next_action에 따라 task / knowledge / handoff / response로 분기한다.
+    6. response 이후 AI 메시지 저장, 세션 종료 처리, agent run log를 저장한다.
     """
 
     graph = StateGraph(AgentState)
@@ -94,7 +74,7 @@ def build_graph(checkpointer=None):
     graph.add_node("conversation", conversation_node)
     graph.add_node("ai_handoff", ai_handoff_node)
     graph.add_node("decision", decision_node)
-    graph.add_node("join", join_after_conversation_and_decision)
+    graph.add_node("task_router", task_router_node)
     graph.add_node("task", task_node)
     graph.add_node(
         "knowledge",
@@ -107,22 +87,29 @@ def build_graph(checkpointer=None):
     graph.add_node("end_session", end_session_node)
     graph.add_node("save_agent_run", save_agent_run_node)
 
-    # conversation(DB 조회)·decision(LLM 분류)·rule(DB 조회)을 동시에 시작한다.
-    # rule은 org 단위 활성 규칙만 읽어 다른 노드 결과에 의존하지 않으므로,
-    # 응답 직전 직렬 단계로 두지 않고 여기서 병렬로 처리해 첫 토큰 지연을 줄인다.
-    # 셋 다 superstep 0에서 시작해 깊이가 같으므로 join은 정확히 한 번만 실행된다.
+    # 1. 먼저 conversation_node에서 상담방 정보와 active task context를 조회한다.
     graph.add_edge(START, "conversation")
-    graph.add_edge(START, "decision")
-    graph.add_edge(START, "rule")
 
-    graph.add_edge("conversation", "join")
-    graph.add_edge("decision", "join")
-    graph.add_edge("rule", "join")
-
-    # AI 자동응답이 꺼져 있으면 decision 결과를 버리고 종료, 아니면 decision 결과로 분기.
+    # 2. active task 여부에 따라 일반 decision 또는 task 전용 router로 분기한다.
     graph.add_conditional_edges(
-        "join",
-        route_after_join,
+        "conversation",
+        route_after_conversation,
+        {
+            "ai_handoff": "ai_handoff",
+            "task_router": "task_router",
+            "decision": "decision",
+        },
+    )
+
+    # 3. decision/task_router 이후 rule을 조회한다.
+    # 기존 병렬 join 구조는 intent 중복 업데이트 오류를 만들 수 있으므로 제거한다.
+    graph.add_edge("decision", "rule")
+    graph.add_edge("task_router", "rule")
+
+    # 4. rule 조회 후 next_action에 따라 실행 노드로 분기한다.
+    graph.add_conditional_edges(
+        "rule",
+        route_after_decision,
         {
             "ai_handoff": "ai_handoff",
             "task": "task",
@@ -130,13 +117,13 @@ def build_graph(checkpointer=None):
             "response": "response",
         },
     )
+
     graph.add_edge("ai_handoff", END)
 
-    # task 실행 결과(성공/실패/다음 단계)도 knowledge처럼 항상 response를 거쳐
-    # LLM이 자연스러운 마무리·후속 질문을 만들게 한다.
+    # task 실행 결과도 항상 response를 거쳐 자연스러운 응답을 만든다.
     graph.add_edge("task", "response")
 
-    # rules는 START에서 이미 병렬 조회됐으므로 knowledge 후 바로 응답으로 간다.
+    # knowledge 검색 후 response 생성
     graph.add_edge("knowledge", "response")
 
     # 응답 저장 및 로그 저장
