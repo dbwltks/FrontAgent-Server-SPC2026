@@ -12,6 +12,49 @@ logger = logging.getLogger(__name__)
 
 FALLBACK_RESPONSE = "일시적인 오류로 답변 생성에 실패했습니다. 잠시 후 다시 시도해 주세요."
 
+def _build_task_resume_message(state: dict) -> str | None:
+    """
+    태스크 진행 중 지식 질문에 답한 뒤,
+    원래 태스크 단계로 복귀시키기 위한 안내 문구를 만든다.
+
+    상품명/서비스명 키워드 하드코딩이 아니라,
+    현재 task state의 pending_task_prompt를 기반으로 만든다.
+    """
+    has_active_task = state.get("has_active_task", False)
+    use_knowledge = state.get("use_knowledge", False)
+    next_action = state.get("next_action")
+
+    if not has_active_task:
+        return None
+
+    if not use_knowledge:
+        return None
+
+    if next_action != "search_knowledge":
+        return None
+
+    pending_prompt = state.get("pending_task_prompt")
+
+    if pending_prompt:
+        return f"예약을 계속하려면 {pending_prompt}"
+
+    return "예약을 계속하려면 원하시는 서비스를 선택해 주세요."
+
+
+def _append_task_resume_message(response: str, state: dict) -> str:
+    """
+    LLM이 예약 복귀 안내를 빼먹어도 마지막에 반드시 붙인다.
+    """
+    resume_message = _build_task_resume_message(state)
+
+    if not resume_message:
+        return response
+
+    if resume_message in response:
+        return response
+
+    return f"{response.rstrip()}\n\n{resume_message}"
+
 
 async def response_node(state: AgentState) -> AgentState:
     """
@@ -46,6 +89,14 @@ async def response_node(state: AgentState) -> AgentState:
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
         task_result=state.get("task_result"),
+
+        # task_router_node가 판단한 태스크 중간 라우팅 정보
+        has_active_task=state.get("has_active_task", False),
+        task_route=state.get("task_route"),
+        task_route_reason=state.get("task_route_reason"),
+        pending_task_prompt=state.get("pending_task_prompt"),
+        current_task_node_key=state.get("current_task_node_key"),
+
         rules=rules,
         channel=state.get("channel", "web_chat"),
         voice_response_style=voice_response_style,
@@ -74,6 +125,14 @@ async def response_node(state: AgentState) -> AgentState:
             writer({"type": "ai_response_delta", "delta": FALLBACK_RESPONSE})
 
     final_response = "".join(chunks)
+
+    resume_message = _build_task_resume_message(state)
+    if resume_message and resume_message not in final_response:
+        suffix = f"\n\n{resume_message}"
+        final_response = f"{final_response.rstrip()}{suffix}"
+
+        # SSE 스트리밍 응답에도 예약 복귀 문구를 흘려보낸다.
+        writer({"type": "ai_response_delta", "delta": suffix})
 
     state["final_response"] = final_response
     state["messages"] = [{"role": "assistant", "content": final_response}]
