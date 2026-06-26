@@ -21,6 +21,32 @@ router = APIRouter(
     tags=["Organization AI Settings"],
 )
 
+# 실제로 호출 가능한 모델 목록(코드 상수). .env는 비밀키만 보관하고,
+# 선택 가능한 모델/보이스 같은 비밀 아닌 옵션은 여기서 관리한다.
+STT_MODELS_BY_PROVIDER = {
+    "openai": ["gpt-4o-mini-transcribe", "gpt-4o-transcribe", "whisper-1"],
+    "clova": [],  # CLOVA Speech는 모델 선택이 없고 provider 자체가 엔진이다.
+}
+
+TTS_MODELS_BY_PROVIDER = {
+    "openai": ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
+    "elevenlabs": ["eleven_flash_v2_5", "eleven_multilingual_v2"],
+}
+
+# OpenAI는 모델별로 지원 보이스가 다르다(marin/cedar는 gpt-4o-mini-tts 전용).
+TTS_VOICES_BY_MODEL = {
+    "gpt-4o-mini-tts": [
+        "alloy", "ash", "ballad", "coral", "echo", "fable",
+        "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar",
+    ],
+    "tts-1": ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"],
+    "tts-1-hd": ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"],
+}
+
+REALTIME_MODELS = ["gpt-realtime-2"]
+# Realtime은 tts-1/gpt-4o-mini-tts와 보이스 목록이 다르다(fable/nova/onyx 없음, ballad/verse 있음).
+REALTIME_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+
 
 class OrganizationAISettingsUpdateRequest(BaseModel):
     llm_provider: str | None = Field(default=None, example="openai")
@@ -100,7 +126,12 @@ def get_organization_ai_settings(organization_id: str):
         "options": {
             "voice_modes": sorted(ALLOWED_VOICE_MODES),
             "stt_providers": sorted(ALLOWED_STT_PROVIDERS),
+            "stt_models_by_provider": STT_MODELS_BY_PROVIDER,
             "tts_providers": sorted(ALLOWED_TTS_PROVIDERS),
+            "tts_models_by_provider": TTS_MODELS_BY_PROVIDER,
+            "tts_voices_by_model": TTS_VOICES_BY_MODEL,
+            "realtime_models": REALTIME_MODELS,
+            "realtime_voices": REALTIME_VOICES,
             "voice_response_styles": sorted(ALLOWED_VOICE_RESPONSE_STYLES),
             "recommended_templates": [
                 {
