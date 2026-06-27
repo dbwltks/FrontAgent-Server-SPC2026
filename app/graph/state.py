@@ -39,6 +39,7 @@ class AgentState(TypedDict):
     current_task_node_key: Optional[str]
     current_task_node_type: Optional[str]
     pending_task_prompt: Optional[str]
+    follow_up_response: Optional[str]
 
     # 태스크 진행 중 전용 LLM router 결과
     # 예: continue_task, search_knowledge, check_availability, handoff, need_clarification
