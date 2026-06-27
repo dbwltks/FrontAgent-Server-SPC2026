@@ -7,13 +7,21 @@ from app.repositories.rule_repo import (
     get_rule,
     update_rule,
     delete_rule,
+    reset_builtin_rule,
+    update_builtin_rule,
 )
+
+BUILTIN_RULE_ID_PREFIX = "builtin:"
 
 
 router = APIRouter(
     prefix="/rules",
     tags=["Rules"],
 )
+
+# 규칙은 응답 생성 시 매번 전체가 LLM 프롬프트에 그대로 주입된다.
+# 너무 많으면 지시가 희석되고 토큰 비용도 늘어나므로 조직당 개수를 제한한다.
+MAX_RULES_PER_ORGANIZATION = 10
 
 
 def model_to_dict(model: BaseModel) -> dict:
@@ -88,6 +96,13 @@ def create_rule_api(req: RuleCreateRequest):
     규칙을 생성한다.
     """
 
+    existing_count = len(list_rules(req.organization_id))
+    if existing_count >= MAX_RULES_PER_ORGANIZATION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"규칙은 조직당 최대 {MAX_RULES_PER_ORGANIZATION}개까지 등록할 수 있습니다.",
+        )
+
     data = model_to_dict(req)
 
     created = create_rule(data)
@@ -105,13 +120,17 @@ def create_rule_api(req: RuleCreateRequest):
 def list_rules_api(organization_id: str):
     """
     특정 조직의 규칙 목록을 조회한다.
+
+    count는 커스텀 규칙 개수만 센다(MAX_RULES_PER_ORGANIZATION 한도와 동일 기준).
+    삭제 불가한 빌트인 규칙 3개는 한도에 포함되지 않는다.
     """
 
     rules = list_rules(organization_id)
+    custom_count = sum(1 for rule in rules if not rule.get("is_builtin"))
 
     return {
         "organization_id": organization_id,
-        "count": len(rules),
+        "count": custom_count,
         "items": rules,
     }
 
@@ -147,6 +166,8 @@ def update_rule_api(
 ):
     """
     특정 규칙을 수정한다.
+
+    rule_id가 빌트인 규칙(`builtin:`로 시작)이면 오버라이드로 저장한다.
     """
 
     raw_data = model_to_dict(req)
@@ -163,11 +184,19 @@ def update_rule_api(
             detail="No fields to update",
         )
 
-    updated = update_rule(
-        organization_id=organization_id,
-        rule_id=rule_id,
-        data=update_data,
-    )
+    if rule_id.startswith(BUILTIN_RULE_ID_PREFIX):
+        builtin_key = rule_id[len(BUILTIN_RULE_ID_PREFIX):]
+        updated = update_builtin_rule(
+            organization_id=organization_id,
+            builtin_key=builtin_key,
+            data=update_data,
+        )
+    else:
+        updated = update_rule(
+            organization_id=organization_id,
+            rule_id=rule_id,
+            data=update_data,
+        )
 
     if not updated:
         raise HTTPException(
@@ -178,14 +207,47 @@ def update_rule_api(
     return updated
 
 
+@router.post("/{rule_id}/reset")
+def reset_builtin_rule_api(
+    rule_id: str,
+    organization_id: str,
+):
+    """
+    빌트인 규칙을 코드 기본값으로 되돌린다. 커스텀 규칙에는 사용할 수 없다.
+    """
+
+    if not rule_id.startswith(BUILTIN_RULE_ID_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail="커스텀 규칙은 기본값으로 되돌릴 수 없습니다.",
+        )
+
+    builtin_key = rule_id[len(BUILTIN_RULE_ID_PREFIX):]
+    reset = reset_builtin_rule(organization_id=organization_id, builtin_key=builtin_key)
+
+    if not reset:
+        raise HTTPException(
+            status_code=404,
+            detail="Rule not found",
+        )
+
+    return reset
+
+
 @router.delete("/{rule_id}")
 def delete_rule_api(
     rule_id: str,
     organization_id: str,
 ):
     """
-    특정 규칙을 삭제한다.
+    특정 규칙을 삭제한다. 빌트인 규칙은 삭제할 수 없다.
     """
+
+    if rule_id.startswith(BUILTIN_RULE_ID_PREFIX):
+        raise HTTPException(
+            status_code=400,
+            detail="기본 제공 규칙은 삭제할 수 없습니다. 비활성화하거나 기본값으로 되돌리세요.",
+        )
 
     deleted = delete_rule(
         organization_id=organization_id,
