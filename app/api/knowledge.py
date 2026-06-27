@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
+from app.services.service_sync_pipeline import extract_and_sync_services_from_knowledge
 
 from app.core.config import settings
 from app.rag.indexer import create_knowledge_source, index_text, update_source_status
@@ -18,6 +19,7 @@ from app.repositories.knowledge_repo import (
     update_knowledge_source,
     delete_knowledge_source,
     list_knowledge_chunks,
+    delete_knowledge_chunks,
 )
 from app.repositories.knowledge_storage import (
     build_knowledge_storage_path,
@@ -35,22 +37,37 @@ KNOWLEDGE_ERROR_MESSAGE = "Knowledge processing failed"
 
 
 class KnowledgeCreateRequest(BaseModel):
-    organization_id: str = Field(..., example="org_test")
-    title: str = Field(..., example="가격표")
-    content: str = Field(..., example="기본 상담은 50,000원입니다.")
+    organization_id: str = Field(
+        ...,
+        example="00000000-0000-0000-0000-000000000000",
+    )
+    title: str = Field(..., example="화장실 청소 안내")
+    content: str = Field(
+        ...,
+        example="화장실 청소는 세면대, 변기, 바닥, 배수구를 청소하는 서비스입니다.",
+    )
     folder_id: str | None = None
+
+    # 지식 등록 후 서비스 후보 자동 추출 여부
+    auto_extract_services: bool = True
 
 
 class KnowledgeUpdateRequest(BaseModel):
     title: str | None = None
+    content: str | None = None
+
     is_referenced: bool | None = None
     status: str | None = None
 
+    # 본문 수정 후 서비스 후보 재추출 여부
+    auto_extract_services: bool = True
+
 
 @router.post("/knowledge")
-def create_knowledge(req: KnowledgeCreateRequest):
+async def create_knowledge(req: KnowledgeCreateRequest):
     try:
-        result = index_text(
+        result = await asyncio.to_thread(
+            index_text,
             organization_id=req.organization_id,
             title=req.title,
             text=req.content,
@@ -58,7 +75,18 @@ def create_knowledge(req: KnowledgeCreateRequest):
             source_type="text",
         )
 
-        return result
+        source_id = result.get("source_id") or result.get("id")
+
+        service_sync = await _maybe_extract_services_from_knowledge(
+            organization_id=req.organization_id,
+            source_id=source_id,
+            enabled=req.auto_extract_services,
+        )
+
+        return {
+            **result,
+            "service_sync": service_sync,
+        }
 
     except Exception:
         logger.exception("knowledge indexing failed")
@@ -165,12 +193,19 @@ async def upload_knowledge(
             source_id=source_id,
         )
 
+        service_sync = await _maybe_extract_services_from_knowledge(
+            organization_id=organization_id,
+            source_id=source_id,
+            enabled=True,
+        )
+
         return {
             "file_name": original_file_name,
             "mime_type": mime_type,
             "file_size": uploaded_bytes,
             "text_length": len(extracted_text),
             **result,
+            "service_sync": service_sync,
         }
 
     except HTTPException:
@@ -192,6 +227,38 @@ async def upload_knowledge(
             os.remove(temp_file_path)
 
         await file.close()
+
+async def _maybe_extract_services_from_knowledge(
+    *,
+    organization_id: str,
+    source_id: str | None,
+    enabled: bool,
+) -> dict | None:
+    """
+    지식 저장/수정 후 서비스 후보를 추출한다.
+
+    서비스 추출 실패가 지식 저장 실패로 이어지면 안 되므로,
+    예외는 잡아서 sync_error 형태로 반환한다.
+    """
+    if not enabled or not source_id:
+        return None
+
+    try:
+        return await extract_and_sync_services_from_knowledge(
+            organization_id=organization_id,
+            knowledge_source_id=source_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "service extraction after knowledge indexing failed: organization_id=%s, source_id=%s",
+            organization_id,
+            source_id,
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "error": str(exc),
+        }
 
 
 def _mark_source_failed(source_id: str) -> None:
@@ -281,36 +348,110 @@ def get_knowledge_download_url(source_id: str, organization_id: str):
 
 
 @router.patch("/knowledge/{source_id}")
-def patch_knowledge_source(
+async def patch_knowledge_source(
     source_id: str,
     organization_id: str,
     req: KnowledgeUpdateRequest,
 ):
-    update_data = {
-        key: value
-        for key, value in req.model_dump(exclude_unset=True).items()
-        if value is not None or isinstance(value, bool)
-    }
-
-    if not update_data:
-        raise HTTPException(
-            status_code=400,
-            detail="No fields to update",
-        )
-
-    updated = update_knowledge_source(
+    source = get_knowledge_source(
         organization_id=organization_id,
         source_id=source_id,
-        data=update_data,
     )
 
-    if not updated:
+    if not source:
         raise HTTPException(
             status_code=404,
             detail="Knowledge source not found",
         )
 
-    return updated
+    update_data = {
+        key: value
+        for key, value in req.model_dump(
+            exclude_unset=True,
+            exclude={"content", "auto_extract_services"},
+        ).items()
+        if value is not None or isinstance(value, bool)
+    }
+
+    content_changed = req.content is not None
+
+    if not update_data and not content_changed:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields to update",
+        )
+
+    updated_source = source
+
+    if update_data:
+        updated_source = update_knowledge_source(
+            organization_id=organization_id,
+            source_id=source_id,
+            data=update_data,
+        )
+
+        if not updated_source:
+            raise HTTPException(
+                status_code=404,
+                detail="Knowledge source not found",
+            )
+
+    service_sync = None
+
+    if content_changed:
+        new_title = (
+            req.title
+            or updated_source.get("title")
+            or source.get("title")
+            or source.get("file_name")
+            or "지식 문서"
+        )
+
+        await asyncio.to_thread(
+            update_source_status,
+            source_id,
+            "indexing",
+        )
+
+        await asyncio.to_thread(
+            delete_knowledge_chunks,
+            organization_id=organization_id,
+            source_id=source_id,
+        )
+
+        reindex_result = await asyncio.to_thread(
+            index_text,
+            organization_id=organization_id,
+            title=new_title,
+            text=req.content or "",
+            folder_id=updated_source.get("folder_id") or source.get("folder_id"),
+            source_type=updated_source.get("source_type") or source.get("source_type") or "text",
+            file_name=updated_source.get("file_name") or source.get("file_name"),
+            mime_type=updated_source.get("mime_type") or source.get("mime_type"),
+            source_id=source_id,
+        )
+
+        service_sync = await _maybe_extract_services_from_knowledge(
+            organization_id=organization_id,
+            source_id=source_id,
+            enabled=req.auto_extract_services,
+        )
+
+        updated_source = get_knowledge_source(
+            organization_id=organization_id,
+            source_id=source_id,
+        )
+
+        return {
+            "knowledge": updated_source,
+            "reindex": reindex_result,
+            "service_sync": service_sync,
+        }
+
+    return {
+        "knowledge": updated_source,
+        "service_sync": service_sync,
+    }
 
 
 @router.delete("/knowledge/{source_id}")

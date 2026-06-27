@@ -94,3 +94,18 @@ def list_knowledge_chunks(
     )
 
     return result.data or []
+
+def delete_knowledge_chunks(
+    *,
+    organization_id: str,
+    source_id: str,
+) -> bool:
+    result = (
+        supabase.table("knowledge_chunks")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("source_id", source_id)
+        .execute()
+    )
+
+    return bool(result.data)
