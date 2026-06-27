@@ -23,18 +23,12 @@ class ReservationConflictError(ReservationRepoError):
 
 
 def list_services(organization_id: str) -> list[dict]:
-    """
-    예약 가능한 서비스 목록을 조회합니다.
-
-    Task Function Node 예시:
-    - reservation.list_services
-    """
     result = (
         supabase.table("services")
         .select("*")
         .eq("organization_id", organization_id)
         .eq("is_active", True)
-        .eq("is_reservable", True)
+        .eq("approval_status", "approved")
         .order("created_at")
         .execute()
     )
@@ -42,21 +36,22 @@ def list_services(organization_id: str) -> list[dict]:
     return result.data or []
 
 
-def get_service(organization_id: str, service_id: str) -> dict | None:
-    """
-    service_id 기준으로 서비스 상세 정보를 조회합니다.
-    """
+def get_service(organization_id: str, service_id: str) -> dict:
     result = (
         supabase.table("services")
         .select("*")
         .eq("organization_id", organization_id)
         .eq("id", service_id)
+        .eq("is_active", True)
+        .eq("approval_status", "approved")
         .limit(1)
         .execute()
     )
 
-    rows = result.data or []
-    return rows[0] if rows else None
+    if not result.data:
+        raise NotFoundError("서비스를 찾을 수 없습니다.")
+
+    return result.data[0]
 
 
 def create_service(

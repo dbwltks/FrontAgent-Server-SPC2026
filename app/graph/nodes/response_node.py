@@ -15,6 +15,60 @@ FALLBACK_RESPONSE = "일시적인 오류로 답변 생성에 실패했습니다.
 DEFAULT_TASK_RESUME_MESSAGE = "예약을 계속하려면 원하시는 서비스를 선택해 주세요."
 
 
+def stream_direct_message(writer, message: str) -> None:
+    """
+    LLM을 거치지 않고 서버가 직접 만든 문장도
+    프론트에서는 스트리밍처럼 보이도록 단어 단위로 흘려보낸다.
+    """
+    parts = message.split(" ")
+
+    for index, part in enumerate(parts):
+        delta = part if index == 0 else f" {part}"
+
+        writer(
+            {
+                "type": "ai_response_delta",
+                "delta": delta,
+            }
+        )
+
+
+def build_service_selection_message_from_task_result(state: dict) -> str | None:
+    """
+    예약 서비스 선택 단계에서는 LLM이 서비스 목록을 다시 요약하게 하지 않고,
+    task_result.variables.available_services.services 기준으로 정확한 선택 문구를 만든다.
+    """
+    task_result = state.get("task_result") or {}
+
+    if task_result.get("status") != "waiting_user_input":
+        return None
+
+    current_node_key = task_result.get("current_node_key")
+    if current_node_key != "ask_service":
+        return None
+
+    variables = task_result.get("variables") or {}
+    available_services = variables.get("available_services") or {}
+    services = available_services.get("services") or []
+
+    if not services:
+        return None
+
+    service_names = [
+        str(service.get("name")).strip()
+        for service in services
+        if isinstance(service, dict) and service.get("name")
+    ]
+
+    if not service_names:
+        return None
+
+    service_text = ", ".join(service_names)
+
+    return f"어떤 서비스를 원하시나요? {service_text} 중에서 선택해 주세요."
+
+
+
 def build_task_resume_message(pending_task_prompt: str | None) -> str:
     """
     태스크 진행 중 지식 질문에 답한 뒤,
@@ -145,6 +199,22 @@ async def response_node(state: AgentState) -> AgentState:
 
     writer = get_stream_writer()
     chunks: list[str] = []
+
+    direct_task_message = build_service_selection_message_from_task_result(state)
+
+    if direct_task_message:
+        stream_direct_message(writer, direct_task_message)
+
+        state["final_response"] = direct_task_message
+        state["follow_up_response"] = None
+        state["messages"] = [
+            {
+                "role": "assistant",
+                "content": direct_task_message,
+            }
+        ]
+
+        return state
 
     try:
         async for delta in stream_text(
