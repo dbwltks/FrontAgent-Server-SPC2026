@@ -8,6 +8,7 @@ from app.api import (
     chat,
     knowledge,
     knowledge_folders,
+    services,
     agent_runs,
     conversations,
     rules,
@@ -56,6 +57,9 @@ app.include_router(knowledge_folders.router)
 # 지식 관리 API
 app.include_router(knowledge.router)
 
+# 서비스 관리 API
+app.include_router(services.router)
+
 # Agent 실행 로그 API
 app.include_router(agent_runs.router)
 
@@ -79,3 +83,4 @@ app.include_router(products.router)
 
 # 상품 주문 도메인 API
 app.include_router(orders.router)
+
