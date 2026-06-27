@@ -94,6 +94,9 @@ def build_initial_state(
         "user_message": user_message,
         "log_message": log_message,
         "channel": channel,
+
+        "pending_task_prompt": None,
+        "follow_up_response": None,
         "conversation_id": None,
         "ai_enabled": True,
 
