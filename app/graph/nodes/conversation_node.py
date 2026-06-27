@@ -37,7 +37,6 @@ def _extract_pending_task_prompt(node: dict[str, Any] | None) -> str | None:
         or config.get("prompt")
         or config.get("question")
         or config.get("text")
-        or node.get("label")
     )
 
 

@@ -128,12 +128,11 @@ async def stream_agent_graph_events(
     LangGraph astream(stream_mode=["custom", "updates"])을 순회하며
     chat/voice 스트림이 공통으로 쓰는 SSE 이벤트를 (event, data) 튜플로 만들어낸다.
 
-    delta/노드 업데이트가 생길 때마다 호출자가 TTS 스케줄링 등 채널별 부가 동작을
-    끼워넣을 수 있도록 on_delta/on_node_update 훅을 받는다. final_state는 호출이
-    끝난 뒤 호출자가 직접 마무리 이벤트(result 등)를 만들 때 쓸 수 있게 반환값으로
-    노출하지 않고, 마지막에 yield하는 ("final_state", final_state) 항목으로 전달한다.
-    """
+    delta/노드 업데이트가 생길 때마다 호출자가 TTS 스케줄링 등
+    채널별 부가 동작을 끼워넣을 수 있도록 on_delta/on_node_update 훅을 받는다.
 
+    final_state는 마지막에 yield하는 ("final_state", final_state) 항목으로 전달한다.
+    """
     final_state: dict = {}
     response_started = False
 
@@ -143,26 +142,43 @@ async def stream_agent_graph_events(
         stream_mode=["custom", "updates"],
     ):
         if mode == "custom":
-            if chunk.get("type") == "ai_response_delta":
+            chunk_type = chunk.get("type")
+
+            if chunk_type == "ai_response_delta":
                 if not response_started:
-                    yield "response_start", {"elapsed_ms": elapsed_ms_since(started_at)}
+                    yield "response_start", {
+                        "elapsed_ms": elapsed_ms_since(started_at)
+                    }
                     response_started = True
 
                 delta = str(chunk.get("delta") or "")
-                yield "delta", {"delta": delta, "elapsed_ms": elapsed_ms_since(started_at)}
+
+                yield "delta", {
+                    "delta": delta,
+                    "elapsed_ms": elapsed_ms_since(started_at),
+                }
 
                 if on_delta:
                     result = on_delta(delta)
                     if result is not None:
                         await result
-            elif chunk.get("type") == "knowledge_start":
+
+            elif chunk_type == "ai_follow_up_message":
+                yield "follow_up_message", {
+                    "message": str(chunk.get("message") or ""),
+                    "elapsed_ms": elapsed_ms_since(started_at),
+                }
+
+            elif chunk_type == "knowledge_start":
                 yield "knowledge_start", {
                     "queries": chunk.get("queries", []),
                     "elapsed_ms": elapsed_ms_since(started_at),
                 }
-            elif chunk.get("type") == "task_step":
+
+            elif chunk_type == "task_step":
                 step = chunk.get("step") or {}
                 label = step.get("node_label") or step.get("node_key") or "태스크 단계"
+
                 yield "trace", {
                     "step": "task",
                     "status": "step",
@@ -174,6 +190,10 @@ async def stream_agent_graph_events(
                     "items": [step],
                     "elapsed_ms": elapsed_ms_since(started_at),
                 }
+
+            # 중요:
+            # custom 이벤트는 여기서 끝내야 함.
+            # 아래 updates 처리로 내려가면 잘못된 chunk를 node_state처럼 해석할 수 있음.
             continue
 
         # mode == "updates": {node_name: partial_state}
@@ -193,6 +213,7 @@ async def stream_agent_graph_events(
                 continue
 
             detail, items = build_trace_detail(node_name, node_state)
+
             yield "trace", {
                 "step": node_name,
                 "status": "done",
