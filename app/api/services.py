@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.core.db import supabase
 from app.services.service_sync_pipeline import extract_and_sync_services_from_knowledge
-
+from app.repositories.service_repo import sync_service_items_and_options_from_payload
 
 router = APIRouter(prefix="/services", tags=["Services"])
 
@@ -427,9 +427,28 @@ def approve_service(
     if not rows:
         raise HTTPException(status_code=500, detail="Failed to approve service")
 
+    approved_service = rows[0]
+
+    hierarchy_sync_result = None
+
+    source_payload = (
+        service.get("raw_payload")
+        or service.get("pending_payload")
+        or approved_service.get("raw_payload")
+        or approved_service.get("pending_payload")
+    )
+
+    if isinstance(source_payload, dict):
+        hierarchy_sync_result = sync_service_items_and_options_from_payload(
+            organization_id=req.organization_id,
+            service_id=approved_service["id"],
+            payload=source_payload,
+        )
+
     return {
         "ok": True,
-        "service": rows[0],
+        "service": approved_service,
+        "hierarchy_sync_result": hierarchy_sync_result,
     }
 
 
@@ -551,9 +570,21 @@ def apply_pending_service_change(
             detail="Failed to apply pending service change",
         )
 
+    updated_service = rows[0]
+
+    hierarchy_sync_result = None
+
+    if isinstance(pending_payload, dict):
+        hierarchy_sync_result = sync_service_items_and_options_from_payload(
+            organization_id=req.organization_id,
+            service_id=updated_service["id"],
+            payload=pending_payload,
+        )
+
     return {
         "ok": True,
-        "service": rows[0],
+        "service": updated_service,
+        "hierarchy_sync_result": hierarchy_sync_result,
     }
 
 @router.post("/{service_id}/ignore-pending")
