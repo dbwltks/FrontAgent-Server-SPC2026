@@ -231,3 +231,219 @@ def mark_source_services_stale(
             stale_services.append(rows[0])
 
     return stale_services
+
+
+def list_services(
+    organization_id: str,
+    only_active: bool = True,
+) -> list[dict]:
+    """
+    특정 조직의 서비스 대분류 목록을 조회한다.
+
+    기존 services 테이블은 지식 파일에서 AI가 추출한 후보도 같이 저장하므로,
+    기본적으로 실제 승인/활성화된 서비스만 조회한다.
+    """
+    query = (
+        supabase.table("services")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .order("created_at", desc=False)
+    )
+
+    if only_active:
+        query = (
+            query
+            .eq("is_active", True)
+            .eq("approval_status", "approved")
+        )
+
+    result = query.execute()
+    return result.data or []
+
+
+def get_service(
+    organization_id: str,
+    service_id: str,
+) -> dict | None:
+    """
+    특정 서비스 대분류 1개를 조회한다.
+    """
+    result = (
+        supabase.table("services")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("id", service_id)
+        .limit(1)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def list_service_items(
+    organization_id: str,
+    service_id: str | None = None,
+) -> list[dict]:
+    """
+    특정 조직의 실제 예약 상품 목록을 조회한다.
+    예: 이사 청소, 화장실 청소, 세팅 펌
+    """
+    query = (
+        supabase.table("service_items")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("is_available", True)
+        .order("created_at", desc=False)
+    )
+
+    if service_id:
+        query = query.eq("service_id", service_id)
+
+    result = query.execute()
+    return result.data or []
+
+
+def get_service_item(
+    organization_id: str,
+    service_item_id: str,
+) -> dict | None:
+    """
+    특정 서비스 아이템 1개를 조회한다.
+    """
+    result = (
+        supabase.table("service_items")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("id", service_item_id)
+        .limit(1)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def list_service_item_options(
+    organization_id: str,
+    service_item_id: str,
+) -> list[dict]:
+    """
+    특정 서비스 아이템의 옵션 목록을 조회한다.
+    예: 24평형, 34평형, 베란다 확장형
+    """
+    result = (
+        supabase.table("service_item_options")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("service_item_id", service_item_id)
+        .eq("is_available", True)
+        .order("option_group", desc=False)
+        .order("option_value", desc=False)
+        .execute()
+    )
+
+    return result.data or []
+
+def list_active_services(
+    organization_id: str,
+) -> list[dict]:
+    """
+    예약/화면에서 사용할 활성 서비스 대분류 목록 조회.
+    """
+    result = (
+        supabase.table("services")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("is_active", True)
+        .eq("approval_status", "approved")
+        .order("created_at", desc=False)
+        .execute()
+    )
+
+    return result.data or []
+
+
+def calculate_service_price(
+    *,
+    organization_id: str,
+    service_item_id: str,
+    option_ids: list[str] | None = None,
+) -> dict:
+    """
+    서비스 아이템 기본가 + 선택 옵션 가격을 합산한다.
+
+    반환값은 이후 reservations.ordered_summary에 그대로 저장할 수 있는
+    스냅샷 형태를 포함한다.
+    """
+    option_ids = option_ids or []
+
+    item = get_service_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise ValueError("Service item not found")
+
+    base_price = int(item.get("base_price") or 0)
+    base_duration = int(item.get("duration_minutes") or 0)
+
+    options: list[dict] = []
+
+    if option_ids:
+        result = (
+            supabase.table("service_item_options")
+            .select("*")
+            .eq("organization_id", organization_id)
+            .eq("service_item_id", service_item_id)
+            .eq("is_available", True)
+            .in_("id", option_ids)
+            .execute()
+        )
+
+        options = result.data or []
+
+        if len(options) != len(option_ids):
+            raise ValueError("Some service item options were not found")
+
+    options_price = sum(int(option.get("additional_price") or 0) for option in options)
+    options_duration = sum(int(option.get("additional_duration") or 0) for option in options)
+
+    total_price = base_price + options_price
+    total_duration_minutes = base_duration + options_duration
+
+    ordered_summary = {
+        "service_item": {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "description": item.get("description"),
+            "base_price": base_price,
+            "duration_minutes": base_duration,
+        },
+        "options": [
+            {
+                "id": option.get("id"),
+                "option_group": option.get("option_group"),
+                "option_value": option.get("option_value"),
+                "additional_price": int(option.get("additional_price") or 0),
+                "additional_duration": int(option.get("additional_duration") or 0),
+            }
+            for option in options
+        ],
+        "total_price": total_price,
+        "total_duration_minutes": total_duration_minutes,
+    }
+
+    return {
+        "organization_id": organization_id,
+        "service_item_id": service_item_id,
+        "option_ids": option_ids,
+        "base_price": base_price,
+        "options_price": options_price,
+        "total_price": total_price,
+        "base_duration_minutes": base_duration,
+        "options_duration_minutes": options_duration,
+        "total_duration_minutes": total_duration_minutes,
+        "ordered_summary": ordered_summary,
+    }

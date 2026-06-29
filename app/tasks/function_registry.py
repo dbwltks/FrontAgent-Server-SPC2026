@@ -735,6 +735,54 @@ def reservation_get_available_slots(
             }
         )
         return result
+    
+
+def _normalize_string_list(value: Any) -> list[str]:
+    """
+    Function Node params/memory에서 넘어온 값을 문자열 리스트로 정규화한다.
+
+    허용 형태:
+    - ["uuid1", "uuid2"]
+    - "uuid1"
+    - "uuid1,uuid2"
+    - [{"id": "uuid1"}, {"id": "uuid2"}]
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        normalized = []
+
+        for item in value:
+            if isinstance(item, dict):
+                item_id = item.get("id")
+                if item_id:
+                    normalized.append(str(item_id))
+                continue
+
+            if item:
+                normalized.append(str(item))
+
+        return normalized
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        if value in {"", "없음", "없어요", "없어", "no", "none", "null", "[]"}:
+            return []
+
+        if "," in value:
+            return [
+                part.strip()
+                for part in value.split(",")
+                if part.strip()
+                and part.strip() not in {"없음", "없어요", "없어", "no", "none", "null", "[]"}
+            ]
+
+        return [value]
+
+    return [str(value)]
+
 
 
 def reservation_create_reservation(
@@ -748,6 +796,18 @@ def reservation_create_reservation(
     organization_id = _get_value(params, variables, "organization_id")
     conversation_id = _get_value(params, variables, "conversation_id")
     service_id = _get_value(params, variables, "service_id")
+
+    service_item_id = _get_value(params, variables, "service_item_id")
+    selected_option_ids = _normalize_string_list(
+        _get_value(
+            params,
+            variables,
+            "selected_option_ids",
+            "option_ids",
+            "service_option_ids",
+            default=[],
+        )
+    )
 
     customer_name = _get_value(params, variables, "customer_name", "name")
     customer_phone = _get_value(params, variables, "customer_phone", "phone")
@@ -769,14 +829,17 @@ def reservation_create_reservation(
         missing_keys.append("organization_id")
     if not service_id:
         missing_keys.append("service_id")
+    if selected_option_ids and not service_item_id:
+        missing_keys.append("service_item_id")
     if not customer_name:
         missing_keys.append("customer_name")
     if not customer_phone:
         missing_keys.append("customer_phone")
     if not start_at:
         missing_keys.append("start_at")
-    if not end_at:
+    if not end_at and not service_item_id:
         missing_keys.append("end_at")
+    
 
     if missing_keys:
         return {
@@ -793,6 +856,8 @@ def reservation_create_reservation(
             organization_id=organization_id,
             conversation_id=conversation_id,
             service_id=service_id,
+            service_item_id=service_item_id,
+            selected_option_ids=selected_option_ids,
             customer_name=customer_name,
             customer_phone=customer_phone,
             customer_email=customer_email,
