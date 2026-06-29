@@ -4,6 +4,13 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 from supabase import create_client
 from app.core.config import settings
+import re
+import calendar
+
+from app.repositories.service_repo import (
+    resolve_service_item_by_name,
+    resolve_service_options_by_name,
+)
 
 from app.repositories.reservation_repo import (
     NotFoundError,
@@ -735,7 +742,311 @@ def reservation_get_available_slots(
             }
         )
         return result
+    
 
+def _normalize_string_list(value: Any) -> list[str]:
+    """
+    Function Node params/memory에서 넘어온 값을 문자열 리스트로 정규화한다.
+
+    허용 형태:
+    - ["uuid1", "uuid2"]
+    - "uuid1"
+    - "uuid1,uuid2"
+    - [{"id": "uuid1"}, {"id": "uuid2"}]
+    """
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        normalized = []
+
+        for item in value:
+            if isinstance(item, dict):
+                item_id = item.get("id")
+                if item_id:
+                    normalized.append(str(item_id))
+                continue
+
+            if item:
+                normalized.append(str(item))
+
+        return normalized
+
+    if isinstance(value, str):
+        value = value.strip()
+
+        if value in {"", "없음", "없어요", "없어", "no", "none", "null", "[]"}:
+            return []
+
+        if "," in value:
+            return [
+                part.strip()
+                for part in value.split(",")
+                if part.strip()
+                and part.strip() not in {"없음", "없어요", "없어", "no", "none", "null", "[]"}
+            ]
+
+        return [value]
+
+    return [str(value)]
+
+def reservation_resolve_service_item(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    service_id = _get_value(params, variables, "service_id")
+
+    service_item_text = _get_value(
+        params,
+        variables,
+        "service_item_text",
+        "service_item_name",
+        "service_item_input",
+        "service_item",
+    )
+
+    if not organization_id:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "organization_id_missing",
+            "message": "organization_id가 필요합니다.",
+            "service_item_id": None,
+        }
+
+    if not service_item_text:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "service_item_text_missing",
+            "message": "예약할 서비스명을 입력해주세요.",
+            "service_item_id": None,
+        }
+
+    return resolve_service_item_by_name(
+        organization_id=organization_id,
+        service_id=service_id,
+        user_text=str(service_item_text),
+    )
+
+
+def reservation_resolve_service_options(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    organization_id = _get_value(params, variables, "organization_id")
+    service_item_id = _get_value(params, variables, "service_item_id")
+
+    option_text = _get_value(
+        params,
+        variables,
+        "option_text",
+        "option_name",
+        "option_input",
+        "selected_options_text",
+        "selected_option_names",
+        "selected_option_ids",
+        default="",
+    )
+
+    if not organization_id:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "organization_id_missing",
+            "message": "organization_id가 필요합니다.",
+            "selected_option_ids": [],
+        }
+
+    if not service_item_id:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "service_item_id_missing",
+            "message": "서비스 아이템을 먼저 선택해야 합니다.",
+            "selected_option_ids": [],
+        }
+
+    return resolve_service_options_by_name(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+        user_text=str(option_text or ""),
+    )
+
+def _add_month(year: int, month: int) -> tuple[int, int]:
+    if month == 12:
+        return year + 1, 1
+    return year, month + 1
+
+
+def _parse_korean_reservation_datetime(
+    text: str,
+    timezone: str = "Asia/Seoul",
+) -> datetime | None:
+    tz = ZoneInfo(timezone)
+    now = datetime.now(tz)
+    raw_text = str(text or "").strip()
+
+    if not raw_text:
+        return None
+
+    # 이미 ISO 형식으로 들어온 경우도 그대로 허용
+    try:
+        parsed = datetime.fromisoformat(raw_text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=tz)
+        return parsed.astimezone(tz)
+    except ValueError:
+        pass
+
+    normalized = raw_text.replace(" ", "")
+
+    # 날짜 파싱
+    target_date = None
+
+    if "오늘" in normalized:
+        target_date = now.date()
+    elif "내일" in normalized:
+        target_date = (now + timedelta(days=1)).date()
+    elif "모레" in normalized:
+        target_date = (now + timedelta(days=2)).date()
+    elif "글피" in normalized:
+        target_date = (now + timedelta(days=3)).date()
+
+    # 예: 7월5일, 7/5
+    if target_date is None:
+        month_day_match = re.search(r"(?P<month>\d{1,2})\s*(월|/)\s*(?P<day>\d{1,2})\s*일?", raw_text)
+        if month_day_match:
+            month = int(month_day_match.group("month"))
+            day = int(month_day_match.group("day"))
+            year = now.year
+
+            candidate = datetime(year, month, day, tzinfo=tz).date()
+            if candidate < now.date():
+                year += 1
+
+            target_date = datetime(year, month, day, tzinfo=tz).date()
+
+    # 예: 5일 오후 1시
+    if target_date is None:
+        day_match = re.search(r"(?P<day>\d{1,2})\s*일", raw_text)
+        if day_match:
+            day = int(day_match.group("day"))
+            year = now.year
+            month = now.month
+
+            last_day = calendar.monthrange(year, month)[1]
+
+            if day > last_day:
+                return None
+
+            candidate = datetime(year, month, day, tzinfo=tz).date()
+
+            if candidate < now.date():
+                year, month = _add_month(year, month)
+                last_day = calendar.monthrange(year, month)[1]
+
+                if day > last_day:
+                    return None
+
+                candidate = datetime(year, month, day, tzinfo=tz).date()
+
+            target_date = candidate
+
+    if target_date is None:
+        return None
+
+    # 시간 파싱
+    time_match = re.search(
+        r"(?P<ampm>오전|오후|아침|낮|저녁|밤)?\s*(?P<hour>\d{1,2})\s*시\s*(?P<minute>\d{1,2})?\s*분?",
+        raw_text,
+    )
+
+    if not time_match:
+        return None
+
+    hour = int(time_match.group("hour"))
+    minute = int(time_match.group("minute") or 0)
+    ampm = time_match.group("ampm")
+
+    if hour > 23 or minute > 59:
+        return None
+
+    if ampm in {"오후", "낮", "저녁", "밤"}:
+        if hour < 12:
+            hour += 12
+    elif ampm == "오전":
+        if hour == 12:
+            hour = 0
+    else:
+        # 예약 서비스에서는 "3시"를 보통 오후 3시로 말하는 경우가 많아서
+        # 1~7시는 오후로 보정
+        if 1 <= hour <= 7:
+            hour += 12
+
+    return datetime(
+        target_date.year,
+        target_date.month,
+        target_date.day,
+        hour,
+        minute,
+        tzinfo=tz,
+    )
+
+
+def reservation_normalize_start_at(
+    params: dict[str, Any],
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    start_at_text = _get_value(
+        params,
+        variables,
+        "start_at_text",
+        "start_at",
+        "reservation_time_text",
+        "datetime_text",
+    )
+
+    timezone = _get_value(
+        params,
+        variables,
+        "timezone",
+        default="Asia/Seoul",
+    )
+
+    if not start_at_text:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "start_at_text_missing",
+            "message": "예약 날짜와 시간을 입력해주세요.",
+            "start_at": None,
+        }
+
+    parsed = _parse_korean_reservation_datetime(
+        text=str(start_at_text),
+        timezone=str(timezone or "Asia/Seoul"),
+    )
+
+    if parsed is None:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "start_at_parse_failed",
+            "message": "예약 날짜와 시간을 이해하지 못했습니다. 예: 내일 오후 3시, 5일 오후 1시",
+            "start_at": None,
+            "start_at_text": start_at_text,
+        }
+
+    return {
+        "ok": True,
+        "resolved": True,
+        "start_at": parsed.isoformat(),
+        "start_at_text": start_at_text,
+        "timezone": str(timezone or "Asia/Seoul"),
+        "message": None,
+    }
 
 def reservation_create_reservation(
     params: dict[str, Any],
@@ -748,6 +1059,18 @@ def reservation_create_reservation(
     organization_id = _get_value(params, variables, "organization_id")
     conversation_id = _get_value(params, variables, "conversation_id")
     service_id = _get_value(params, variables, "service_id")
+
+    service_item_id = _get_value(params, variables, "service_item_id")
+    selected_option_ids = _normalize_string_list(
+        _get_value(
+            params,
+            variables,
+            "selected_option_ids",
+            "option_ids",
+            "service_option_ids",
+            default=[],
+        )
+    )
 
     customer_name = _get_value(params, variables, "customer_name", "name")
     customer_phone = _get_value(params, variables, "customer_phone", "phone")
@@ -769,14 +1092,17 @@ def reservation_create_reservation(
         missing_keys.append("organization_id")
     if not service_id:
         missing_keys.append("service_id")
+    if selected_option_ids and not service_item_id:
+        missing_keys.append("service_item_id")
     if not customer_name:
         missing_keys.append("customer_name")
     if not customer_phone:
         missing_keys.append("customer_phone")
     if not start_at:
         missing_keys.append("start_at")
-    if not end_at:
+    if not end_at and not service_item_id:
         missing_keys.append("end_at")
+    
 
     if missing_keys:
         return {
@@ -793,6 +1119,8 @@ def reservation_create_reservation(
             organization_id=organization_id,
             conversation_id=conversation_id,
             service_id=service_id,
+            service_item_id=service_item_id,
+            selected_option_ids=selected_option_ids,
             customer_name=customer_name,
             customer_phone=customer_phone,
             customer_email=customer_email,
@@ -1596,6 +1924,21 @@ FUNCTION_REGISTRY: dict[str, RegisteredTaskFunction] = {
         name="reservation.get_available_slots",
         handler=reservation_get_available_slots,
         description="서비스와 날짜 기준으로 예약 가능한 시간을 조회한다.",
+    ),
+    "reservation.resolve_service_item": RegisteredTaskFunction(
+        name="reservation.resolve_service_item",
+        handler=reservation_resolve_service_item,
+        description="사용자가 입력한 서비스 아이템 이름을 service_item_id로 변환한다.",
+    ),
+    "reservation.resolve_service_options": RegisteredTaskFunction(
+        name="reservation.resolve_service_options",
+        handler=reservation_resolve_service_options,
+        description="사용자가 입력한 옵션 이름들을 selected_option_ids로 변환한다.",
+    ),
+    "reservation.normalize_start_at": RegisteredTaskFunction(
+        name="reservation.normalize_start_at",
+        handler=reservation_normalize_start_at,
+        description="사용자가 입력한 자연어 예약 시간을 ISO datetime으로 변환한다.",
     ),
 
     "reservation.create_reservation": RegisteredTaskFunction(

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.db import supabase
 from app.repositories.booking_setting_repo import get_or_create_booking_setting
-
+from app.repositories.service_repo import calculate_service_price
 
 RESERVATION_ACTIVE_STATUSES = ["requested", "confirmed"]
 
@@ -403,25 +403,71 @@ def create_reservation(
     customer_phone: str | None,
     customer_email: str | None,
     start_at: datetime,
-    end_at: datetime,
+    end_at: datetime | None = None,
     conversation_id: str | None = None,
     source_channel: str = "web_chat",
     memo: str | None = None,
     created_by: str = "ai",
+    service_item_id: str | None = None,
+    selected_option_ids: list[str] | None = None,
 ) -> dict:
     """
     예약 요청을 생성합니다.
 
     기본 상태는 requested입니다.
     확정은 confirm_reservation()에서 처리합니다.
+
+    service_item_id가 있으면 서비스 아이템/옵션 기준으로 가격과 소요 시간을 계산하고,
+    reservations에 service_item_id, selected_options, total_price, ordered_summary를 저장합니다.
     """
+    selected_option_ids = selected_option_ids or []
+
+    if selected_option_ids and not service_item_id:
+        raise ReservationRepoError(
+            "service_item_id is required when selected_option_ids are provided"
+        )
+
     service = get_service(organization_id, service_id)
 
     if not service:
         raise NotFoundError("Service not found")
-    
+
     if service.get("is_active") is False or service.get("is_reservable") is False:
         raise ReservationRepoError("Service is not reservable")
+
+    price_result: dict | None = None
+
+    if service_item_id:
+        try:
+            price_result = calculate_service_price(
+                organization_id=organization_id,
+                service_item_id=service_item_id,
+                option_ids=selected_option_ids,
+            )
+        except ValueError as exc:
+            raise ReservationRepoError(str(exc))
+
+        if end_at is None:
+            total_duration_minutes = int(
+                price_result.get("total_duration_minutes") or 0
+            )
+
+            if total_duration_minutes <= 0:
+                raise ReservationRepoError(
+                    "total_duration_minutes must be greater than 0"
+                )
+
+            end_at = start_at + timedelta(minutes=total_duration_minutes)
+
+    if end_at is None:
+        service_duration_minutes = service.get("duration_minutes")
+
+        if service_duration_minutes is None:
+            raise ReservationRepoError(
+                "end_at is required when service duration is missing"
+            )
+
+        end_at = start_at + timedelta(minutes=int(service_duration_minutes))
 
     if start_at >= end_at:
         raise ReservationRepoError("start_at must be earlier than end_at")
@@ -462,6 +508,16 @@ def create_reservation(
         "memo": memo,
         "created_by": created_by,
     }
+
+    if price_result:
+        insert_data.update(
+            {
+                "service_item_id": service_item_id,
+                "selected_options": price_result["ordered_summary"].get("options", []),
+                "total_price": price_result.get("total_price", 0),
+                "ordered_summary": price_result.get("ordered_summary", {}),
+            }
+        )
 
     result = supabase.table("reservations").insert(insert_data).execute()
     rows = result.data or []

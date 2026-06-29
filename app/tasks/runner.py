@@ -103,6 +103,7 @@ class DynamicTaskRunner:
         # 이번 턴에 거쳐간 노드 경로. 루프 안에서 그 자리에서 채우므로
         # 별도 DB 조회 없이 대화 로그(metadata)에 그대로 실어 보낼 수 있다.
         trace: list[dict[str, Any]] = []
+        response_messages: list[str] = []
 
         for _ in range(max_steps):
             node = self.repository.get_node_by_key(
@@ -155,6 +156,9 @@ class DynamicTaskRunner:
             if on_trace:
                 on_trace({**trace_item, "index": len(trace)})
 
+            if executor_result.message:
+                response_messages.append(executor_result.message)
+
             if executor_result.next_behavior == "wait_user":
                 self.repository.update_session(
                     task_session_id,
@@ -168,7 +172,7 @@ class DynamicTaskRunner:
 
                 return TaskRunResponse(
                     handled=True,
-                    message=executor_result.message,
+                    message="\n".join(response_messages) if response_messages else executor_result.message,
                     status="waiting_user_input",
                     flow_id=flow_id,
                     task_session_id=task_session_id,
@@ -190,7 +194,7 @@ class DynamicTaskRunner:
 
                 return TaskRunResponse(
                     handled=True,
-                    message=executor_result.message,
+                    message="\n".join(response_messages) if response_messages else executor_result.message,
                     status="completed",
                     flow_id=flow_id,
                     task_session_id=task_session_id,
@@ -212,7 +216,7 @@ class DynamicTaskRunner:
 
                 return TaskRunResponse(
                     handled=True,
-                    message=executor_result.message,
+                    message="\n".join(response_messages) if response_messages else executor_result.message,
                     status="handoff",
                     flow_id=flow_id,
                     task_session_id=task_session_id,
@@ -317,20 +321,7 @@ class DynamicTaskRunner:
             # 사용자 입력은 현재 waiting node에서 한 번만 소비한다.
             was_waiting_for_input = False
 
-            # Message Node의 message가 있으면 일단 사용자에게 반환한다.
-            # 다음 노드까지 계속 자동 진행하면 메시지가 여러 개 합쳐질 수 있으므로
-            # MVP 2단계에서는 message가 있는 노드는 한 번 응답하고 멈춘다.
-            if executor_result.message:
-                return TaskRunResponse(
-                    handled=True,
-                    message=executor_result.message,
-                    status="running",
-                    flow_id=flow_id,
-                    task_session_id=task_session_id,
-                    current_node_key=current_node_key,
-                    variables=variables,
-                    trace=trace,
-                )
+            continue
 
         return self._mark_failed(
             task_session_id=task_session_id,
