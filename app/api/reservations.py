@@ -49,6 +49,16 @@ class ReservationCreateRequest(BaseModel):
         examples=["00000000-0000-0000-0000-000000000000"],
     )
 
+    service_item_id: str | None = Field(
+        default=None,
+        example="이사 청소 service_item_id",
+    )
+
+    selected_option_ids: list[str] = Field(
+        default_factory=list,
+        example=["24평형 option_id", "베란다 확장형 option_id"],
+    )
+
     customer_name: str | None = Field(
         default=None,
         example="김민수",
@@ -66,8 +76,8 @@ class ReservationCreateRequest(BaseModel):
         ...,
         example="2026-07-01T15:00:00+09:00",
     )
-    end_at: datetime = Field(
-        ...,
+    end_at: datetime | None = Field(
+        default=None,
         example="2026-07-01T16:30:00+09:00",
     )
 
@@ -399,6 +409,8 @@ def create_reservation_api(
             organization_id=request.organization_id,
             conversation_id=request.conversation_id,
             service_id=request.service_id,
+            service_item_id=request.service_item_id,
+            selected_option_ids=request.selected_option_ids,
             customer_name=request.customer_name,
             customer_phone=request.customer_phone,
             customer_email=request.customer_email,

@@ -1,14 +1,38 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.core.db import supabase
 from app.services.service_sync_pipeline import extract_and_sync_services_from_knowledge
 
+from app.repositories.service_repo import (
+    list_active_services,
+    get_service,
+    list_service_items,
+    get_service_item,
+    list_service_item_options,
+    calculate_service_price,
+)
+
 
 router = APIRouter(prefix="/services", tags=["Services"])
+
+
+class CalculateServicePriceRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    )
+    service_item_id: str = Field(
+        ...,
+        example="이사 청소 service_item_id",
+    )
+    option_ids: list[str] = Field(
+        default_factory=list,
+        example=["옵션 id 1", "옵션 id 2"],
+    )
 
 
 def _now_iso() -> str:
@@ -668,3 +692,126 @@ def deactivate_service(
         "reason": req.reason,
         "service": rows[0],
     }
+
+
+@router.get("")
+def list_services_api(
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+):
+    services = list_active_services(organization_id=organization_id)
+
+    return {
+        "organization_id": organization_id,
+        "count": len(services),
+        "items": services,
+    }
+
+
+@router.get("/{service_id}/items")
+def list_service_items_by_service_api(
+    service_id: str,
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+):
+    service = get_service(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    items = list_service_items(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    return {
+        "organization_id": organization_id,
+        "service_id": service_id,
+        "service_name": service.get("name"),
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.get("/items")
+def list_service_items_api(
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+    service_id: str | None = Query(default=None),
+):
+    items = list_service_items(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    return {
+        "organization_id": organization_id,
+        "service_id": service_id,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@router.get("/items/{service_item_id}")
+def get_service_item_api(
+    service_item_id: str,
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+):
+    item = get_service_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    return item
+
+
+@router.get("/items/{service_item_id}/options")
+def list_service_item_options_api(
+    service_item_id: str,
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+):
+    item = get_service_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    options = list_service_item_options(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    return {
+        "organization_id": organization_id,
+        "service_item_id": service_item_id,
+        "service_item_name": item.get("name"),
+        "count": len(options),
+        "items": options,
+    }
+
+@router.post("/items/calculate-price")
+def calculate_service_price_api(
+    request: CalculateServicePriceRequest,
+):
+    """
+    서비스 아이템과 선택 옵션을 기준으로 최종 가격과 소요 시간을 계산한다.
+    """
+    try:
+        result = calculate_service_price(
+            organization_id=request.organization_id,
+            service_item_id=request.service_item_id,
+            option_ids=request.option_ids,
+        )
+
+        return result
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=404,
+            detail=str(e),
+        )
