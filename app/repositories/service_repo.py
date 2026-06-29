@@ -447,3 +447,227 @@ def calculate_service_price(
         "total_duration_minutes": total_duration_minutes,
         "ordered_summary": ordered_summary,
     }
+
+def _normalize_match_text(value: str | None) -> str:
+    return str(value or "").strip().lower().replace(" ", "")
+
+
+def _is_empty_option_text(value: str | None) -> bool:
+    normalized = _normalize_match_text(value)
+    return normalized in {
+        "",
+        "없음",
+        "없어요",
+        "없어",
+        "선택안함",
+        "선택없음",
+        "no",
+        "none",
+        "null",
+        "[]",
+    }
+
+
+def _match_by_name_or_text(
+    *,
+    user_text: str,
+    candidates: list[dict],
+    name_key: str,
+) -> list[dict]:
+    user_norm = _normalize_match_text(user_text)
+
+    if not user_norm:
+        return []
+
+    exact_matches = [
+        candidate
+        for candidate in candidates
+        if _normalize_match_text(candidate.get(name_key)) == user_norm
+    ]
+
+    if exact_matches:
+        return exact_matches
+
+    contains_matches = [
+        candidate
+        for candidate in candidates
+        if _normalize_match_text(candidate.get(name_key)) in user_norm
+    ]
+
+    if contains_matches:
+        return contains_matches
+
+    reverse_contains_matches = [
+        candidate
+        for candidate in candidates
+        if user_norm in _normalize_match_text(candidate.get(name_key))
+    ]
+
+    return reverse_contains_matches
+
+
+def resolve_service_item_by_name(
+    *,
+    organization_id: str,
+    user_text: str,
+    service_id: str | None = None,
+) -> dict:
+    items = list_service_items(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+
+    matches = _match_by_name_or_text(
+        user_text=user_text,
+        candidates=items,
+        name_key="name",
+    )
+
+    if len(matches) == 1:
+        item = matches[0]
+
+        return {
+            "ok": True,
+            "resolved": True,
+            "service_item_id": item.get("id"),
+            "service_item_name": item.get("name"),
+            "service_item": item,
+            "candidates": [],
+            "message": None,
+        }
+
+    if len(matches) > 1:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "ambiguous_service_item",
+            "message": "예약할 서비스가 여러 개로 해석됩니다. 정확한 서비스명을 다시 입력해주세요.",
+            "service_item_id": None,
+            "service_item_name": None,
+            "service_item": None,
+            "candidates": [
+                {
+                    "id": item.get("id"),
+                    "name": item.get("name"),
+                    "base_price": item.get("base_price"),
+                    "duration_minutes": item.get("duration_minutes"),
+                }
+                for item in matches
+            ],
+        }
+
+    return {
+        "ok": False,
+        "resolved": False,
+        "error_code": "service_item_not_found",
+        "message": "입력하신 서비스 아이템을 찾지 못했습니다. 다시 입력해주세요.",
+        "service_item_id": None,
+        "service_item_name": None,
+        "service_item": None,
+        "candidates": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "base_price": item.get("base_price"),
+                "duration_minutes": item.get("duration_minutes"),
+            }
+            for item in items
+        ],
+    }
+
+
+def resolve_service_options_by_name(
+    *,
+    organization_id: str,
+    service_item_id: str,
+    user_text: str,
+) -> dict:
+    if _is_empty_option_text(user_text):
+        return {
+            "ok": True,
+            "resolved": True,
+            "selected_option_ids": [],
+            "selected_options": [],
+            "unmatched_text": [],
+            "message": "선택한 옵션이 없습니다.",
+        }
+
+    options = list_service_item_options(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    normalized_text = _normalize_match_text(user_text)
+
+    matched_options = []
+
+    for option in options:
+        option_value_norm = _normalize_match_text(option.get("option_value"))
+
+        if option_value_norm and option_value_norm in normalized_text:
+            matched_options.append(option)
+
+    if not matched_options:
+        parts = [
+            part.strip()
+            for part in str(user_text or "")
+            .replace("이랑", ",")
+            .replace("하고", ",")
+            .replace("랑", ",")
+            .split(",")
+            if part.strip()
+        ]
+
+        for part in parts:
+            matches = _match_by_name_or_text(
+                user_text=part,
+                candidates=options,
+                name_key="option_value",
+            )
+
+            for match in matches:
+                if match not in matched_options:
+                    matched_options.append(match)
+
+    if not matched_options:
+        return {
+            "ok": False,
+            "resolved": False,
+            "error_code": "service_options_not_found",
+            "message": "입력하신 옵션을 찾지 못했습니다. 다시 입력해주세요.",
+            "selected_option_ids": [],
+            "selected_options": [],
+            "candidates": [
+                {
+                    "id": option.get("id"),
+                    "option_group": option.get("option_group"),
+                    "option_value": option.get("option_value"),
+                    "additional_price": option.get("additional_price"),
+                    "additional_duration": option.get("additional_duration"),
+                }
+                for option in options
+            ],
+        }
+
+    return {
+        "ok": True,
+        "resolved": True,
+        "selected_option_ids": [
+            str(option.get("id"))
+            for option in matched_options
+            if option.get("id")
+        ],
+        "selected_options": [
+            {
+                "id": option.get("id"),
+                "option_group": option.get("option_group"),
+                "option_value": option.get("option_value"),
+                "additional_price": option.get("additional_price"),
+                "additional_duration": option.get("additional_duration"),
+            }
+            for option in matched_options
+        ],
+        "unmatched_text": [],
+        "message": None,
+    }
+

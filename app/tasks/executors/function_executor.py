@@ -21,6 +21,7 @@ def execute_function_node(
     save_to_memory = config.get("save_to_memory", True)
     save_as = config.get("save_as")
     flatten_result = config.get("flatten_result", False)
+    memory_mappings = config.get("memory_mappings") or {}
 
     if not function_name:
         return ExecutorResult(
@@ -81,6 +82,11 @@ def execute_function_node(
             else:
                 result_key = save_as or f"{function_name}_result"
                 memory_updates[result_key] = function_result
+
+            if isinstance(function_result, dict) and isinstance(memory_mappings, dict):
+                for memory_key, result_key in memory_mappings.items():
+                    if result_key in function_result:
+                        memory_updates[memory_key] = function_result.get(result_key)
 
         return ExecutorResult(
             status="success",
