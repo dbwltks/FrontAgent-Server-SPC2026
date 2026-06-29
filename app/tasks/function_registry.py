@@ -8,6 +8,7 @@ import re
 import calendar
 
 from app.repositories.service_repo import (
+    list_service_items,
     resolve_service_item_by_name,
     resolve_service_options_by_name,
 )
@@ -790,6 +791,95 @@ def _normalize_string_list(value: Any) -> list[str]:
 
     return [str(value)]
 
+def _is_service_list_request(text: str | None) -> bool:
+    normalized = str(text or "").replace(" ", "").strip()
+
+    if not normalized:
+        return False
+
+    list_request_patterns = [
+        "어떤서비스",
+        "무슨서비스",
+        "서비스뭐",
+        "서비스목록",
+        "목록",
+        "뭐있",
+        "뭐가있",
+        "가능한서비스",
+        "예약가능한서비스",
+        "종류",
+    ]
+
+    return any(pattern in normalized for pattern in list_request_patterns)
+
+
+def _build_service_item_list_message(items: list[dict]) -> str:
+    active_items = [
+        item
+        for item in items
+        if item.get("is_active", True)
+    ]
+
+    if not active_items:
+        return "현재 예약 가능한 서비스를 찾지 못했습니다. 담당자 확인이 필요합니다."
+
+    lines = ["예약 가능한 서비스는 다음과 같습니다."]
+
+    for index, item in enumerate(active_items, start=1):
+        name = item.get("name") or "이름 없는 서비스"
+        base_price = item.get("base_price")
+        duration_minutes = item.get("duration_minutes")
+
+        extra_parts = []
+
+        if base_price is not None:
+            extra_parts.append(f"{int(base_price):,}원")
+
+        if duration_minutes:
+            extra_parts.append(f"{duration_minutes}분")
+
+        extra_text = f" ({' / '.join(extra_parts)})" if extra_parts else ""
+        lines.append(f"{index}. {name}{extra_text}")
+
+    lines.append("")
+    lines.append("원하시는 서비스를 말씀해 주세요.")
+
+    return "\n".join(lines)
+
+def _build_available_service_list_message(services: list[dict]) -> str:
+    active_services = []
+
+    for service in services or []:
+        if not service.get("is_active", True):
+            continue
+
+        if service.get("approval_status") not in {None, "approved"}:
+            continue
+
+        if service.get("is_reservable") is False:
+            continue
+
+        active_services.append(service)
+
+    if not active_services:
+        return "현재 예약 가능한 서비스를 찾지 못했습니다. 담당자 확인이 필요합니다."
+
+    lines = ["예약 가능한 서비스는 다음과 같습니다."]
+
+    for index, service in enumerate(active_services, start=1):
+        name = service.get("name")
+        price = service.get("price")
+
+        if price is None:
+            lines.append(f"{index}. {name}")
+        else:
+            lines.append(f"{index}. {name} - {int(price):,}원")
+
+    lines.append("")
+    lines.append("원하시는 서비스를 말씀해 주세요.")
+
+    return "\n".join(lines)
+
 def reservation_resolve_service_item(
     params: dict[str, Any],
     variables: dict[str, Any],
@@ -820,8 +910,29 @@ def reservation_resolve_service_item(
             "ok": False,
             "resolved": False,
             "error_code": "service_item_text_missing",
-            "message": "예약할 서비스명을 입력해주세요.",
+            "message": "어떤 서비스를 예약하시겠어요?",
             "service_item_id": None,
+        }
+
+    if _is_service_list_request(str(service_item_text)):
+        available_services = variables.get("available_services") or {}
+        services = available_services.get("services") or []
+
+        message = _build_available_service_list_message(services)
+
+        return {
+            "ok": False,
+            "resolved": False,
+            "needs_service_list": True,
+            "error_code": "service_list_requested",
+
+            # 함수 실행 결과 중 사용자에게 반드시 보여줄 메시지
+            "message": message,
+            "user_visible_message": message,
+
+            "service_list_message": message,
+            "service_item_id": None,
+            "service_item_name": None,
         }
 
     return resolve_service_item_by_name(

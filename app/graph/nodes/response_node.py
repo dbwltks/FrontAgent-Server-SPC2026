@@ -1,7 +1,7 @@
 import logging
 
 from langgraph.config import get_stream_writer
-
+import asyncio
 from app.graph.message_utils import history_from_state_messages
 from app.graph.prompt_builder import build_response_instructions
 from app.graph.state import AgentState
@@ -131,6 +131,21 @@ def remove_accidental_follow_up_text(
 
     return cleaned
 
+def _get_user_visible_task_message(task_result: dict | None) -> str | None:
+    if not isinstance(task_result, dict):
+        return None
+
+    variables = task_result.get("variables") or {}
+
+    for value in reversed(list(variables.values())):
+        if not isinstance(value, dict):
+            continue
+
+        message = value.get("user_visible_message")
+        if message:
+            return str(message)
+
+    return None
 
 async def response_node(state: AgentState) -> AgentState:
     """
@@ -161,6 +176,32 @@ async def response_node(state: AgentState) -> AgentState:
     )
 
     is_knowledge_during_active_task = is_knowledge_question_during_active_task(state)
+
+    task_result = state.get("task_result") or {}
+
+    user_visible_task_message = _get_user_visible_task_message(task_result)
+    task_message = user_visible_task_message or task_result.get("message")
+
+    task_status = task_result.get("status")
+
+    # Task Runner가 사용자에게 바로 보여줄 메시지를 만든 경우,
+    # LLM으로 다시 생성하지 않고 그대로 응답한다.
+    # 예: "어떤 서비스를 예약하시겠어요?"
+    if (
+        task_result.get("handled")
+        and task_message
+        and task_status in {"waiting_user_input", "completed", "handoff"}
+    ):
+        writer = get_stream_writer()
+
+        # 기존 LLM 스트리밍처럼 한 글자씩 delta 전송
+        for char in task_message:
+            writer({"type": "ai_response_delta", "delta": char})
+            await asyncio.sleep(0)
+
+        state["final_response"] = task_message
+        state["messages"] = [{"role": "assistant", "content": task_message}]
+        return state
 
     instructions = build_response_instructions(
         intent=intent,

@@ -22,6 +22,7 @@ class TaskRouteDecision(BaseModel):
 
     route: Literal[
         "continue_task",
+        "task_help",
         "search_knowledge",
         "check_availability",
         "handoff",
@@ -44,31 +45,48 @@ TASK_ROUTER_INSTRUCTIONS = """
 route 기준:
 
 1. continue_task
-- 사용자가 현재 태스크가 기다리는 값을 제공한 경우
+- 사용자가 현재 태스크가 기다리는 값을 직접 제공한 경우
 - 예: 서비스 선택, 날짜 입력, 시간 입력, 주소 입력, 이름 입력, 전화번호 입력
 - 현재 태스크 단계의 질문에 직접 답한 경우
 
-2. search_knowledge
-- 사용자가 서비스, 상품, 가격, 옵션, 차이, 정책, 준비사항, 주의사항 등 정보성 설명을 물어본 경우
+2. task_help
+- 사용자가 현재 태스크 단계에 답하기 위해 선택지, 목록, 예시, 가능한 값, 입력 방법을 물어본 경우
+- 이 경우는 knowledge 검색이 아니라 태스크 내부에서 처리한다.
+- 예:
+  - 서비스 선택 단계에서 사용자가 선택 가능한 서비스 목록을 물어봄
+  - 옵션 선택 단계에서 사용자가 선택 가능한 옵션 목록을 물어봄
+  - 날짜/시간 입력 단계에서 사용자가 어떤 형식으로 말하면 되는지 물어봄
+- task_help는 현재 태스크를 계속 진행해야 하므로 continue_task와 같이 run_task로 보낸다.
+
+3. search_knowledge
+- 현재 태스크 단계의 입력값이나 선택 도움 요청이 아니라,
+  별도의 정보성 설명을 물어본 경우
+- 예:
+  - 특정 서비스가 무엇인지 설명을 요청함
+  - 두 서비스의 차이를 물어봄
+  - 가격, 정책, 준비사항, 주의사항, 환불, 반려동물 가능 여부를 물어봄
 - 이 경우 태스크는 종료하지 않는다.
 - 지식 검색 후 원래 태스크 단계로 복귀한다.
 - 새 지식이나 새 서비스명이 추가되어도 코드 수정 없이 이 route를 선택해야 한다.
 
-3. check_availability
+4. check_availability
 - 사용자가 예약 가능한 시간, 가장 빠른 시간, 특정 날짜/시간 가능 여부를 물어본 경우
 - 이 경우 지식 검색이 아니라 예약/캘린더/DB 조회 흐름으로 보내야 한다.
 
-4. handoff
+5. handoff
 - 사용자가 사람, 상담사, 직원, 관리자 연결을 요청한 경우
 
-5. need_clarification
+6. need_clarification
 - 사용자의 의도가 불명확해서 바로 처리 경로를 고르기 어려운 경우
 
 중요 규칙:
 - 질문 형태라고 해서 무조건 search_knowledge로 보내지 않는다.
-- 현재 태스크가 기다리는 값에 대한 직접 답변이면 continue_task다.
+- 현재 태스크가 기다리는 값을 직접 답하면 continue_task다.
+- 현재 태스크 단계에 답하기 위해 선택지나 목록을 요청하면 task_help다.
+- task_help는 search_knowledge가 아니라 run_task로 처리한다.
+- 현재 노드가 무엇을 기다리는지 가장 중요하게 본다.
+- 서비스 설명/상품 설명/가격/정책/옵션의 의미/차이 질문은 search_knowledge다.
 - 예약 가능 시간/가장 빠른 시간/특정 시간 가능 여부 질문은 check_availability다.
-- 서비스 설명/상품 설명/가격/정책/옵션/차이 질문은 search_knowledge다.
 - 상품명, 서비스명, 업종별 키워드를 코드에 하드코딩하지 않는 것이 목표다.
 - 사용자가 정보성 질문을 했다면 knowledge_queries에 검색에 사용할 짧은 질문을 넣는다.
 - search_knowledge가 아니면 knowledge_queries는 빈 배열로 둔다.
@@ -121,13 +139,14 @@ def _task_route_update(decision: TaskRouteDecision, user_message: str) -> dict:
             generated_queries=decision.knowledge_queries,
         )
 
-    if route == "continue_task":
+    if route in {"continue_task", "task_help"}:
         return {
             "task_route": route,
             "task_route_confidence": decision.confidence,
             "task_route_reason": decision.reason,
 
             # 기존 진행 중인 task_session을 그대로 이어간다.
+            # task_help도 현재 태스크 내부에서 처리한다.
             "next_action": "run_task",
             "task_type": None,
 
