@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict, is_dataclass
 
 from langchain_core.tools import StructuredTool
@@ -41,6 +42,12 @@ AGENT_SYSTEM_PROMPT_HEADER = """
 - "~가능한가요?", "~되나요?", "~할 수 있어요?"처럼 일반 조건을 묻는 의문문은
   run_task가 아니라 search_knowledge로 보낸다. run_task는 사용자가 지금 바로
   그 작업을 시작/이어가려 할 때만 쓴다.
+- "어떤 서비스 있어요?", "뭐 파세요?", "메뉴 좀 알려주세요"처럼 예약 가능한
+  서비스 종류/목록 자체를 묻는 질문은 지식 베이스 문서가 아니라 예약 시스템의
+  서비스 카탈로그에 있는 정보다. search_knowledge로 보내면 지식 문서의 일부
+  단편만 가져와 부정확하거나 엉뚱한 항목을 답할 수 있다 - 반드시
+  run_task(task_type: reservation_create)로 보낸다. run_task 결과가 정확한
+  서비스 목록을 보여준다.
 - [현재 요청 상태]에 "진행 중인 Task가 있습니다"라고 나와 있으면, 이번 사용자
   메시지는 그 예약을 이어가기 위한 답변(날짜, 시간, 서비스명, 인원수 등)일
   가능성이 매우 높다. 이 경우에도 task_type을 reservation_create로 그대로
@@ -55,7 +62,16 @@ AGENT_SYSTEM_PROMPT_HEADER = """
 
 
 class SearchKnowledgeArgs(BaseModel):
-    query: str = Field(description="검색에 사용할 한국어 질문. 사용자 원문을 최대한 그대로 사용한다.")
+    query: str = Field(
+        description=(
+            "검색에 사용할 한국어 질문. 사용자 원문이 짧거나 모호하면("
+            "예: \"가격이 얼마예요?\", \"몇 시까지 해요?\") 대화 맥락(직전에 "
+            "언급된 서비스명 등)을 반영해 구체적인 문장으로 보강한다. "
+            "예: \"가격이 얼마예요?\" + 직전에 \"베란다 청소\" 언급 → "
+            "\"베란다 청소 가격이 얼마예요?\". 맥락이 없으면 일반적인 키워드를 "
+            "추가한다(예: \"몇 시까지 해요?\" → \"영업시간이 몇 시까지인가요?\")."
+        )
+    )
 
 
 class RunTaskArgs(BaseModel):
@@ -338,9 +354,29 @@ async def agent_node(state: AgentState) -> dict:
         # 마크다운 헤더나 중복 chunk까지 그대로 다 읽어버려 듣기 힘들어지므로
         # (실측: 494자) 가장 유사도 높은 chunk 1개만, 그것도 일정 길이로
         # 잘라서 쓴다.
-        direct_message = summarize_knowledge_chunk(chunks[0]) if chunks else None
-        if not direct_message:
-            direct_message = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
+        #
+        # 1등과 2등 chunk의 유사도 차이가 작으면(서로 다른 서비스 항목이
+        # 비슷한 점수로 경쟁 중이라는 뜻) "가격이 얼마예요?"처럼 서비스명을
+        # 안 밝힌 모호한 질문일 가능성이 높다 - 둘 다 헤더가 있는 항목형
+        # chunk라면(같은 카테고리 안 여러 항목 중 헷갈리는 상황) 임의로
+        # 하나를 답하지 않고 어떤 항목인지 되묻는다. 일반 FAQ(영업시간,
+        # 정책 등)는 헤더가 없는 단일 chunk라 이 분기를 타지 않는다.
+        AMBIGUITY_GAP_THRESHOLD = 0.05
+        item_names = []
+        if len(chunks) >= 2:
+            gap = (chunks[0].get("similarity") or 0) - (chunks[1].get("similarity") or 0)
+            if gap < AMBIGUITY_GAP_THRESHOLD:
+                for c in chunks[:3]:
+                    match = re.search(r"^#{1,6}\s*(?:서비스\s*아이템)\s*:?\s*(\S.*)$", c.get("content") or "", re.MULTILINE)
+                    if match:
+                        item_names.append(match.group(1).strip())
+
+        if item_names and len(set(item_names)) >= 2:
+            direct_message = f"어떤 서비스를 말씀하시는 걸까요? {', '.join(dict.fromkeys(item_names))} 중에서 알려주시면 안내해 드릴게요."
+        else:
+            direct_message = summarize_knowledge_chunk(chunks[0]) if chunks else None
+            if not direct_message:
+                direct_message = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
         writer({"type": "ai_response_delta", "delta": direct_message})
         return {
             "intent": intent,
