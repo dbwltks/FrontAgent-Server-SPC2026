@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # threshold 필터링 후에도 match_count개를 채울 수 있도록 여유분을 더 가져온다.
 OVERFETCH_MULTIPLIER = 4
 
-SIMILARITY_THRESHOLD = 0.35
+SIMILARITY_THRESHOLD = 0.25
 
 # "영업시간이 언제예요?"와 "몇 시까지 하나요?"처럼 표현이 달라도 같은 의미면
 # RAG 검색(임베딩 API 호출은 이미 했으니, 이후의 Supabase RPC)을 건너뛰기 위한
@@ -158,15 +158,46 @@ def summarize_knowledge_chunk(chunk: dict) -> str | None:
     if not content:
         return None
 
-    # "### 제목", "- 옵션: 값" 같은 구조적 줄은 듣기/읽기에 부적합하므로
-    # 일반 문장으로 보이는 줄만 남긴다.
+    # "### 서비스 아이템: 이사 청소" 같은 마크다운 헤더는 "이건 어떤 항목에
+    # 대한 설명인지" 알려주는 핵심 정보다 - 그냥 버리면 "설명: ~입니다"만
+    # 남아 어느 서비스 얘기인지 알 수 없는 답변이 된다(실측 사례). 헤더
+    # 기호와 "서비스 아이템:"/"서비스 카테고리:" 같은 라벨만 떼어 이름만
+    # 답변 맨 앞에 붙인다.
+    heading_name: str | None = None
+    heading_match = re.search(
+        r"^#{1,6}\s*(?:서비스\s*아이템|서비스\s*카테고리)?\s*:?\s*(\S.*)$",
+        content,
+        re.MULTILINE,
+    )
+    if heading_match:
+        heading_name = heading_match.group(1).strip()
+
+    # "### 제목", "- 옵션: 값" 같은 구조적 줄, 그리고 "1. 영업시간"처럼 숫자
+    # 목록 제목만 있는 줄, "프리미엄 청소 FAQ 테스트 문서"처럼 본문 없이
+    # 파일 제목만 있는 첫 줄은 듣기/읽기에 부적합하므로 일반 문장으로 보이는
+    # 줄만 남긴다(문장부호로 안 끝나는 5단어 이하 줄은 제목으로 간주).
+    def _looks_like_heading(line: str) -> bool:
+        if re.match(r"^\d+[.)]\s*\S+$", line) and len(line.split()) <= 4:
+            return True
+        if not line.endswith((".", "!", "?", "다", "요", "임", "음")) and len(line.split()) <= 6:
+            return True
+        return False
+
     lines = [
         line.strip()
         for line in content.splitlines()
-        if line.strip() and not line.strip().startswith(("#", "-", "*"))
+        if line.strip()
+        and not line.strip().startswith(("#", "-", "*"))
+        and not _looks_like_heading(line.strip())
     ]
     plain_text = " ".join(lines) if lines else re.sub(r"[#*\-]+", " ", content)
     plain_text = re.sub(r"\s+", " ", plain_text).strip()
+    # 본문 첫 줄이 "설명: ~"인 경우가 많아, heading_name과 합치면
+    # "이사 청소: 설명: ~"처럼 라벨이 중복된다 - "설명:" 라벨은 떼어낸다.
+    plain_text = re.sub(r"^설명\s*:\s*", "", plain_text)
+
+    if heading_name:
+        plain_text = f"{heading_name}: {plain_text}" if plain_text else heading_name
 
     if len(plain_text) <= KNOWLEDGE_ANSWER_MAX_CHARS:
         return plain_text
