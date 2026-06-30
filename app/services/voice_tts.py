@@ -1,6 +1,7 @@
 import io
 import logging
 import wave
+from typing import AsyncIterator
 
 import httpx
 from fastapi import HTTPException
@@ -43,6 +44,10 @@ def tts_log_fields(tts: dict) -> tuple[str, str]:
     if tts.get("provider") == "elevenlabs":
         return "elevenlabs", (tts.get("elevenlabs_model") or settings.elevenlabs_model)
     return "openai", (tts.get("model") or settings.voice_tts_model)
+
+
+def _elevenlabs_configured(tts: dict) -> bool:
+    return bool(settings.elevenlabs_api_key) and bool(tts.get("elevenlabs_voice_id"))
 
 
 def _pcm16_to_wav(pcm: bytes, sample_rate: int, channels: int = 1) -> bytes:
@@ -131,11 +136,99 @@ async def synthesize_speech_content(
     """
     TTS provider(openai/elevenlabs)에 따라 합성한다. 어느 쪽이든 wav 바이트를 반환해
     스트리밍 청크 재생 경로(content_type=audio/wav)와 일관되게 한다.
+
+    문장 전체 합성이 끝날 때까지 기다리는 비스트리밍 경로다. 첫 오디오 바이트를
+    최대한 빨리 흘려보내고 싶으면 stream_speech_content를 쓴다.
     """
     speech_text = normalize_text_for_korean_speech(text)
-    if tts.get("provider") == "elevenlabs":
+    if tts.get("provider") == "elevenlabs" and _elevenlabs_configured(tts):
         return await _synthesize_elevenlabs(speech_text, tts)
+    if tts.get("provider") == "elevenlabs":
+        logger.warning("ElevenLabs not configured, falling back to OpenAI TTS")
     return await _synthesize_openai(
+        speech_text,
+        tts.get("model") or settings.voice_tts_model,
+        tts.get("voice") or settings.voice_tts_voice,
+        response_format,
+    )
+
+
+# ElevenLabs 스트리밍 PCM을 이 정도 크기로 모아 WAV 청크 하나로 흘려보낸다.
+# 너무 작으면 청크 개수(=클라이언트 디코딩 오버헤드)가 늘고, 너무 크면 첫 청크가
+# 늦어진다. 24kHz 16bit mono 기준 약 0.2초 분량.
+_ELEVENLABS_STREAM_CHUNK_BYTES = ELEVENLABS_PCM_RATE * 2 // 5
+
+
+async def _stream_elevenlabs(speech_text: str, tts: dict) -> AsyncIterator[bytes]:
+    api_key = settings.elevenlabs_api_key
+    voice_id = tts.get("elevenlabs_voice_id")
+    model_id = tts.get("elevenlabs_model") or settings.elevenlabs_model
+
+    if not api_key:
+        logger.error("ElevenLabs API key is not configured")
+        raise HTTPException(status_code=500, detail="ElevenLabs is not configured")
+    if not voice_id:
+        logger.error("ElevenLabs voice_id is not configured")
+        raise HTTPException(status_code=500, detail="ElevenLabs voice is not configured")
+
+    pcm_buffer = bytearray()
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            async with client.stream(
+                "POST",
+                f"{ELEVENLABS_TTS_URL}/{voice_id}/stream",
+                params={
+                    "output_format": f"pcm_{ELEVENLABS_PCM_RATE}",
+                    # 0(기본, 미최적화)~4(최대 최적화). 4는 발음 정확도가 다소
+                    # 떨어질 수 있으나 web_call의 첫 오디오 지연이 우선이라 채택한다.
+                    "optimize_streaming_latency": 4,
+                },
+                headers={"xi-api-key": api_key, "Content-Type": "application/json"},
+                json={"text": speech_text, "model_id": model_id},
+            ) as response:
+                if not response.is_success:
+                    body = await response.aread()
+                    logger.error(
+                        "ElevenLabs stream rejected request: status=%s body=%s",
+                        response.status_code,
+                        body[:500],
+                    )
+                    raise HTTPException(status_code=502, detail="Speech generation failed")
+
+                async for raw_chunk in response.aiter_bytes():
+                    pcm_buffer.extend(raw_chunk)
+                    while len(pcm_buffer) >= _ELEVENLABS_STREAM_CHUNK_BYTES:
+                        chunk = bytes(pcm_buffer[:_ELEVENLABS_STREAM_CHUNK_BYTES])
+                        del pcm_buffer[:_ELEVENLABS_STREAM_CHUNK_BYTES]
+                        yield _pcm16_to_wav(chunk, ELEVENLABS_PCM_RATE)
+    except httpx.HTTPError:
+        logger.exception("ElevenLabs speech stream failed")
+        raise HTTPException(status_code=502, detail="Speech generation failed")
+
+    if pcm_buffer:
+        yield _pcm16_to_wav(bytes(pcm_buffer), ELEVENLABS_PCM_RATE)
+
+
+async def stream_speech_content(
+    *,
+    text: str,
+    tts: dict,
+    response_format: str = TTS_RESPONSE_FORMAT,
+) -> AsyncIterator[bytes]:
+    """
+    가능하면 진짜 스트리밍(ElevenLabs)으로 오디오 청크를 흘려보낸다.
+    OpenAI는 스트리밍 청크 분할을 지원하지 않으므로 합성이 끝난 통짜 결과를
+    한 번에 yield해 호출부가 provider와 무관하게 같은 인터페이스로 쓸 수 있게 한다.
+    """
+    speech_text = normalize_text_for_korean_speech(text)
+
+    if tts.get("provider") == "elevenlabs":
+        async for chunk in _stream_elevenlabs(speech_text, tts):
+            yield chunk
+        return
+
+    yield await _synthesize_openai(
         speech_text,
         tts.get("model") or settings.voice_tts_model,
         tts.get("voice") or settings.voice_tts_voice,

@@ -337,8 +337,10 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
         "model": realtime_model,
         "instructions": (
             "너는 전화 상담을 중계하는 음성 세션이다. "
-            "사용자가 말할 때마다 query_agent 함수를 정확히 한 번 호출하고, "
-            "message에는 사용자의 발화를 한국어 텍스트로 전달한다. "
+            "사용자가 실제로 의미 있는 말을 했을 때만 query_agent 함수를 정확히 한 번 "
+            "호출하고, message에는 사용자의 발화를 한국어 텍스트로 전달한다. "
+            "잡음, 숨소리, 무음, 알아들을 수 없는 짧은 소리처럼 실제 발화가 아닌 입력에는 "
+            "절대 함수를 호출하지 않고 아무 말도 하지 않는다. "
             "함수 결과를 받기 전에는 자체 지식으로 답하지 않는다. "
             "함수 결과를 받은 뒤에는 내용을 추가하거나 바꾸지 말고 실제 상담원처럼 자연스럽게 읽는다. "
             "사용자에게 AI, 함수, 시스템 같은 내부 구현 단어를 말하지 않는다."
@@ -373,7 +375,12 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
                 },
             },
         ],
-        "tool_choice": "required",
+        # required는 매 turn마다 query_agent 호출을 강제해, 에코/잡음으로 생긴
+        # 허위 turn에도 모델이 message를 지어내 함수를 호출하게 만든다(사용자가
+        # 말하지 않은 내용으로 AI가 혼자 대화를 이어가는 증상의 원인). instructions
+        # 에 이미 "의미 있는 발화가 아니면 호출하지 마라"를 명시했으므로 auto로
+        # 바꿔도 실제 발화에는 정상적으로 호출된다.
+        "tool_choice": "auto",
     }
 
 

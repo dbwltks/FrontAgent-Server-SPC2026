@@ -14,6 +14,7 @@ from app.api import (
     rules,
     task_flows,
     voice,
+    web_call,
     organization_ai_settings,
     reservations,
     booking_settings,
@@ -44,6 +45,9 @@ app.include_router(chat.router)
 
 # 브라우저 WebRTC 음성 통화 세션
 app.include_router(voice.router)
+
+# 웹 음성방(web_call) 실시간 WebSocket (ver3.md, 3단계: 텍스트만 우선 처리)
+app.include_router(web_call.router)
 
 # 조직별 AI/음성 모델 설정 API
 app.include_router(organization_ai_settings.router)

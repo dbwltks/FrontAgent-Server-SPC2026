@@ -1,9 +1,9 @@
 import time
 from typing import Any
 
-from supabase import Client, create_client
+from supabase import Client
 
-from app.core.config import settings
+from app.core.db import supabase as default_supabase_client
 
 
 ACTIVE_TASK_STATUSES = [
@@ -27,10 +27,11 @@ def invalidate_enabled_flow_cache(organization_id: str) -> None:
 
 class TaskRepository:
     def __init__(self, client: Client | None = None):
-        self.client = client or create_client(
-            settings.supabase_url,
-            settings.supabase_service_role_key,
-        )
+        # 매 대화 턴(conversation_node)마다 TaskRepository()가 새로 생성되므로,
+        # 여기서 매번 create_client()를 부르면 그때마다 새 httpx 클라이언트가
+        # 만들어져 불필요한 연결 비용이 응답 지연에 누적된다. app/core/db.py가
+        # 이미 모듈 전역으로 들고 있는 클라이언트를 기본값으로 재사용한다.
+        self.client = client or default_supabase_client
 
     def find_enabled_flow_for_task_type(
         self,

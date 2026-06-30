@@ -7,12 +7,12 @@ AGENT_ERROR_MESSAGE = "Agent response failed"
 
 # LangGraph stream_mode="updates"가 알려주는 노드 완료 이벤트를 SSE trace 이벤트로 변환한다.
 NODE_TRACE_LABELS = {
-    "conversation": "대화 세션 확인 완료",
-    "decision": "의도 분석 완료",
+    "prepare": "대화 세션/의도 분석 완료",
+    "task_router": "태스크 라우팅 완료",
     "task": "태스크 실행 완료",
     "knowledge": "지식 검색 완료",
-    "rule": "규칙 평가 완료",
     "response": "응답 생성 완료",
+    "finalize": "마무리 처리 완료",
 }
 
 
@@ -64,7 +64,7 @@ def build_call_end_payload(
 
 
 def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
-    if node_name == "decision":
+    if node_name == "prepare":
         detail = (
             f"intent={node_state.get('intent')} / "
             f"next_action={node_state.get('next_action')} / "
@@ -100,17 +100,6 @@ def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
             for g in groups
         ]
         return f"{len(node_state.get('knowledge_queries', []))}개 질문 / {len(sources)}개 문서 참조", items
-
-    if node_name == "rule":
-        rules = node_state.get("rules", [])
-        items = [
-            {
-                "name": r.get("name", "unnamed"),
-                "instruction": r.get("instruction", ""),
-            }
-            for r in rules
-        ]
-        return f"활성 규칙 {len(rules)}개를 응답 지시문에 반영", items
 
     return "", []
 

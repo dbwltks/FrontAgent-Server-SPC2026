@@ -43,8 +43,11 @@ def _resolve_organization_config(organization_id: str) -> dict:
     config = {
         "provider": provider,
         "model": model,
-        # decision_model이 비어 있으면 응답용 모델을 그대로 분류에도 쓴다.
-        "decision_model": organization.get("decision_model") or model,
+        # decision_model이 비어 있으면 응답용 모델(gpt-4.1-mini 등 더 무거운
+        # 모델)이 아니라 가벼운 기본 모델(settings.decision_model)로 분류한다.
+        # intent 분류 + direct_answer 생성을 LLM 1번에 묶었기 때문에, 이 호출이
+        # 느리면 일반 대화 전체가 느려진다.
+        "decision_model": organization.get("decision_model") or settings.decision_model,
         "voice_response_style": organization.get("voice_response_style", "friendly_short"),
     }
 
@@ -80,7 +83,7 @@ async def get_voice_response_style(organization_id: str) -> str:
     return config["voice_response_style"]
 
 
-def _history_to_messages(conversation_history: list[dict] | None) -> list:
+def history_to_messages(conversation_history: list[dict] | None) -> list:
     if not conversation_history:
         return []
 
@@ -144,7 +147,7 @@ async def generate_text(
     result = await chain.ainvoke(
         {
             "instructions": instructions,
-            "history": _history_to_messages(conversation_history),
+            "history": history_to_messages(conversation_history),
             "user_message": user_message,
         }
     )
@@ -169,7 +172,7 @@ async def stream_text(
     async for chunk in chain.astream(
         {
             "instructions": instructions,
-            "history": _history_to_messages(conversation_history),
+            "history": history_to_messages(conversation_history),
             "user_message": input_text,
         }
     ):
@@ -204,7 +207,7 @@ async def generate_structured(
     return await chain.ainvoke(
         {
             "instructions": instructions,
-            "history": _history_to_messages(conversation_history),
+            "history": history_to_messages(conversation_history),
             "user_message": user_message,
         }
     )

@@ -121,16 +121,14 @@ def list_rules_api(organization_id: str):
     """
     특정 조직의 규칙 목록을 조회한다.
 
-    count는 커스텀 규칙 개수만 센다(MAX_RULES_PER_ORGANIZATION 한도와 동일 기준).
-    삭제 불가한 빌트인 규칙 3개는 한도에 포함되지 않는다.
+    count는 빌트인 규칙 3개를 포함한 전체 개수다(MAX_RULES_PER_ORGANIZATION 한도와 동일 기준).
     """
 
     rules = list_rules(organization_id)
-    custom_count = sum(1 for rule in rules if not rule.get("is_builtin"))
 
     return {
         "organization_id": organization_id,
-        "count": custom_count,
+        "count": len(rules),
         "items": rules,
     }
 
