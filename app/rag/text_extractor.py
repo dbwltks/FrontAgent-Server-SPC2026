@@ -1,7 +1,8 @@
 from pathlib import Path
 import pandas as pd
 from pypdf import PdfReader
-
+import httpx
+import trafilatura
 
 def extract_pdf_text(file_path: str) -> str:
     reader = PdfReader(file_path)
@@ -71,6 +72,22 @@ def extract_csv_text(file_path: str) -> str:
 def extract_excel_text(file_path: str) -> str:
     df = pd.read_excel(file_path)
     return dataframe_to_searchable_text(df)
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+def extract_text_from_url(url: str) -> str:
+    """URL을 받아 본문 텍스트만 추출한다. (메뉴·광고·푸터 제거)"""
+    response = httpx.get(url, timeout=15, follow_redirects=True, headers=_HEADERS)
+    response.raise_for_status()
+
+    text = trafilatura.extract(response.text) or ""
+    return text.strip()
 
 
 def extract_text_from_file(file_path: str, file_name: str) -> str:
