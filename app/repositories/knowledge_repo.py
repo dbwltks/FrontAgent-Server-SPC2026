@@ -109,3 +109,21 @@ def delete_knowledge_chunks(
     )
 
     return bool(result.data)
+
+def get_knowledge_source_by_checksum(
+    organization_id: str,
+    checksum_sha256: str,
+) -> dict | None:
+    result = (
+        supabase.table("knowledge_sources")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("checksum_sha256", checksum_sha256)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        return None
+
+    return result.data[0]
