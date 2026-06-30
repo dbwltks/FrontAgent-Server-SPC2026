@@ -5,6 +5,7 @@ import os
 import tempfile
 from pathlib import Path
 from uuid import uuid4
+import httpx
 
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
@@ -12,7 +13,7 @@ from app.services.service_sync_pipeline import extract_and_sync_services_from_kn
 
 from app.core.config import settings
 from app.rag.indexer import create_knowledge_source, index_text, update_source_status
-from app.rag.text_extractor import extract_text_from_file
+from app.rag.text_extractor import extract_text_from_file, extract_text_from_url
 from app.repositories.knowledge_repo import (
     list_knowledge_sources,
     get_knowledge_source,
@@ -95,7 +96,63 @@ async def create_knowledge(req: KnowledgeCreateRequest):
             detail=KNOWLEDGE_ERROR_MESSAGE,
         )
 
+class KnowledgeUrlRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="00000000-0000-0000-0000-000000000000",
+    )
+    url: str = Field(..., example="https://example.com/faq")
+    auto_extract_services: bool = True
 
+
+@router.post("/knowledge/url")
+async def create_knowledge_from_url(req: KnowledgeUrlRequest):
+    try:
+        # httpx 네트워크 호출은 블로킹이라 to_thread로 돌린다
+        text = await asyncio.to_thread(extract_text_from_url, req.url)
+
+        if not text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="No text could be extracted from this URL.",
+            )
+
+        result = await asyncio.to_thread(
+            index_text,
+            organization_id=req.organization_id,
+            title=req.url,            # v1은 URL을 제목으로
+            text=text,
+            source_type="url",
+        )
+
+        source_id = result.get("source_id") or result.get("id")
+
+        service_sync = await _maybe_extract_services_from_knowledge(
+            organization_id=req.organization_id,
+            source_id=source_id,
+            enabled=req.auto_extract_services,
+        )
+
+        return {
+            **result,
+            "service_sync": service_sync,
+        }
+
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"URL을 가져올 수 없습니다 (상태 {exc.response.status_code}).",
+    )
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("knowledge url indexing failed")
+        raise HTTPException(
+            status_code=500,
+            detail=KNOWLEDGE_ERROR_MESSAGE,
+        )
+    
 @router.post("/knowledge/upload")
 async def upload_knowledge(
     organization_id: str = Form(...),
@@ -227,6 +284,7 @@ async def upload_knowledge(
             os.remove(temp_file_path)
 
         await file.close()
+
 
 async def _maybe_extract_services_from_knowledge(
     *,
