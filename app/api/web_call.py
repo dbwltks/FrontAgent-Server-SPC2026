@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, WebSocke
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
-from app.rag.retriever import retrieve_knowledge
+from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.conversation_repo import (
     create_conversation_message,
     get_or_create_conversation,
@@ -255,7 +255,10 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
             "사용자가 음성으로 말하든, 채팅으로 글을 입력하든 똑같이 처리한다. "
             "절대 자체 지식으로 답하지 않는다. 항상 아래 두 도구 중 하나를 호출해서 "
             "받은 결과만 그대로, 실제 상담원처럼 자연스럽게 말한다. "
-            "도구 결과 내용을 추가하거나 바꾸지 않는다. "
+            "도구 결과 내용을 추가하거나 바꾸지 않는다. 도구 결과에 없는 세부 정보"
+            "(옵션, 가격, 추가 항목 등)를 먼저 나서서 설명하지 않는다 - 사용자가 "
+            "묻지 않은 정보는 한 번에 다 말하지 말고, 통화이므로 한 번에 한 가지만 "
+            "짧게 묻거나 답한다. "
             "사용자에게 AI, 함수, 도구, 시스템 같은 내부 구현 단어를 말하지 않는다.\n\n"
             "## search_knowledge — PROACTIVE\n"
             "Use when: 가격, 서비스 설명, 정책, 운영시간 등 정보를 묻는 질문.\n"
@@ -471,13 +474,18 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
     LangGraph를 안 거치므로 conversation_node의 메시지 저장 로직도 안 타는데,
     관리자가 통화 내용 전체(지식검색 포함)를 다시 볼 수 있어야 하므로
     여기서 직접 저장한다.
+
+    chunk를 전부 이어붙이지 않는다 - 여러 chunk를 그대로 합쳐 모델에게
+    넘기면(특히 음성 통화) 서로 다른 주제가 섞여 답이 너무 길어지고 맥락에
+    안 맞는 내용까지 같이 말하는 사례가 실측됐다. 가장 유사도 높은 chunk
+    1개만 짧게 정리해서 넘긴다(app/graph/nodes/agent_node.py의 텍스트
+    파이프라인과 동일한 처리).
     """
     chunks = await retrieve_knowledge(organization_id=req.organization_id, query=req.message)
 
-    if not chunks:
+    answer = summarize_knowledge_chunk(chunks[0]) if chunks else None
+    if not answer:
         answer = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
-    else:
-        answer = "\n".join(chunk.get("content", "") for chunk in chunks)
 
     _save_realtime_turn_background(
         organization_id=req.organization_id,

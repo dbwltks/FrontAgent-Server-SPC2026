@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import threading
 
 # 질문 embedding 생성
@@ -135,3 +136,44 @@ async def retrieve_knowledge(
     _store_semantic_cache_background(organization_id, query_embedding, final_rows, folder_id)
 
     return final_rows
+
+
+# 음성 통화에서 한 번에 듣기 부담스럽지 않은 길이. 너무 짧으면 정보가
+# 부족해 보이고, 너무 길면(실측 494자, chunk 여러 개를 그대로 이어붙인 경우)
+# 듣다가 맥락을 놓치거나 서로 다른 주제가 섞여 엉뚱한 답처럼 들린다.
+KNOWLEDGE_ANSWER_MAX_CHARS = 150
+
+
+def summarize_knowledge_chunk(chunk: dict) -> str | None:
+    """
+    검색된 chunk 하나를 음성/채팅으로 듣기 좋은 짧은 답변으로 정리한다. 2차
+    LLM 호출로 자연스럽게 요약하는 대신(속도 우선) 마크다운 헤더/옵션 목록
+    같은 구조적 텍스트를 코드로 제거하고 적당한 길이에서 문장 단위로 자른다.
+
+    여러 chunk를 그대로 이어붙이면(특히 realtime 음성 통화) 서로 다른 주제가
+    섞여 모델이 엉뚱한 내용까지 같이 말하는 사례가 실측됐다 - 호출하는 쪽은
+    가장 유사도 높은 chunk 1개만 넘겨야 한다.
+    """
+    content = (chunk.get("content") or "").strip()
+    if not content:
+        return None
+
+    # "### 제목", "- 옵션: 값" 같은 구조적 줄은 듣기/읽기에 부적합하므로
+    # 일반 문장으로 보이는 줄만 남긴다.
+    lines = [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip() and not line.strip().startswith(("#", "-", "*"))
+    ]
+    plain_text = " ".join(lines) if lines else re.sub(r"[#*\-]+", " ", content)
+    plain_text = re.sub(r"\s+", " ", plain_text).strip()
+
+    if len(plain_text) <= KNOWLEDGE_ANSWER_MAX_CHARS:
+        return plain_text
+
+    # 길이 제한 안에서 마지막 문장 끝(. ! ?)을 찾아 자연스럽게 끊는다.
+    truncated = plain_text[:KNOWLEDGE_ANSWER_MAX_CHARS]
+    last_sentence_end = max(truncated.rfind("."), truncated.rfind("!"), truncated.rfind("?"))
+    if last_sentence_end > 0:
+        return truncated[: last_sentence_end + 1]
+    return truncated.rstrip() + "..."

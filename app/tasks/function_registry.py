@@ -8,6 +8,8 @@ import re
 import calendar
 
 from app.repositories.service_repo import (
+    get_service_item as repo_get_service_item,
+    list_service_items,
     resolve_service_item_by_name,
     resolve_service_options_by_name,
 )
@@ -42,7 +44,6 @@ from app.repositories.order_repo import (
     cancel_order as repo_cancel_order,
     confirm_order as repo_confirm_order,
     create_order as repo_create_order,
-    get_order as repo_get_order,
     lookup_orders_by_phone as repo_lookup_orders_by_phone,
 )
 
@@ -604,6 +605,12 @@ def reservation_list_services(
     """
     Function Node용 서비스 목록 조회 함수.
     Task Flow에서 고객에게 예약 가능한 상품/서비스를 보여줄 때 사용한다.
+
+    고객이 실제로 골라야 하는 단위는 services(대분류, 예: "홈 클리닝")가
+    아니라 service_items(세부 예약 항목, 예: "이사 청소")다. resolve_service_
+    item도 service_items를 대상으로 이름을 매칭하므로, 여기서 대분류만
+    보여주면 고객 답변이 항상 매칭 실패로 되돌아간다(실측된 회귀). 세부
+    항목이 하나도 등록되지 않은 조직(과도기)만 대분류로 폴백한다.
     """
     organization_id = _get_value(params, variables, "organization_id")
 
@@ -617,7 +624,10 @@ def reservation_list_services(
         }
 
     try:
-        services = repo_list_services(organization_id=organization_id)
+        services = list_service_items(organization_id=organization_id)
+
+        if not services:
+            services = repo_list_services(organization_id=organization_id)
 
         return {
             "ok": True,
@@ -647,6 +657,7 @@ def reservation_get_available_slots(
     """
     organization_id = _get_value(params, variables, "organization_id")
     service_id = _get_value(params, variables, "service_id")
+    service_item_id = _get_value(params, variables, "service_item_id")
     target_date_value = _get_value(
         params,
         variables,
@@ -662,6 +673,15 @@ def reservation_get_available_slots(
         "normalized_time",
         "reservation_time",
     )
+
+    # 서비스 아이템(service_items) 단위로 예약을 받는 플로우는 memory에
+    # service_id 없이 service_item_id만 있다(resolve_service_item이
+    # 채워준다). 슬롯 조회는 대분류(services) 단위라 service_item이
+    # 속한 service_id를 역으로 찾아 채운다.
+    if not service_id and service_item_id and organization_id:
+        service_item = repo_get_service_item(organization_id=organization_id, service_item_id=service_item_id)
+        if service_item:
+            service_id = service_item.get("service_id")
 
     missing_keys = []
 
@@ -690,6 +710,7 @@ def reservation_get_available_slots(
             organization_id=organization_id,
             service_id=service_id,
             target_date=target_date,
+            service_item_id=service_item_id,
         )
 
         slots = slot_result.get("slots") or []
@@ -1061,6 +1082,16 @@ def reservation_create_reservation(
     service_id = _get_value(params, variables, "service_id")
 
     service_item_id = _get_value(params, variables, "service_item_id")
+
+    # service_id가 직접 안 넘어오고 service_item_id만 있는 경우(현재 예약 플로우는
+    # 대분류 service가 아니라 세부 service_item 단위로 선택을 받음) service_item에서
+    # 역추론한다. service_item이 어느 service에 속하는지는 service_id 컬럼에 있다.
+    if not service_id and service_item_id and organization_id:
+        service_item_for_id = repo_get_service_item(
+            organization_id=organization_id, service_item_id=service_item_id
+        )
+        if service_item_for_id:
+            service_id = service_item_for_id.get("service_id")
     selected_option_ids = _normalize_string_list(
         _get_value(
             params,
