@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone, timedelta
+from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.core.db import supabase
 from app.repositories.booking_setting_repo import get_or_create_booking_setting
-from app.repositories.service_repo import calculate_service_price
+from app.repositories.service_repo import calculate_service_price, get_service_item
 
 RESERVATION_ACTIVE_STATUSES = ["requested", "confirmed"]
 
@@ -228,6 +228,7 @@ def get_available_slots(
     organization_id: str,
     service_id: str,
     target_date: date,
+    service_item_id: str | None = None,
 ) -> dict:
     """
     예약 가능한 시간 목록을 계산합니다.
@@ -258,7 +259,20 @@ def get_available_slots(
     timezone_name = setting.get("timezone") or "Asia/Seoul"
     timezone = ZoneInfo(timezone_name)
 
-    duration_minutes = int(service["duration_minutes"])
+    # 소요시간은 service(대분류)가 아니라 실제 예약 단위인 service_item(세부
+    # 항목)마다 다르다(예: 이사 청소 180분, 화장실 청소 60분). service_item_id가
+    # 있으면 그 항목의 duration을 우선 쓰고, 대분류의 duration_minutes는 더
+    # 이상 필수가 아니므로(세부항목 단위 예약으로 전환) None이면 기본값으로
+    # 폴백한다 - 과거에는 대분류 자체에 duration이 있는 게 전제였다.
+    duration_minutes = None
+    if service_item_id:
+        service_item = get_service_item(organization_id, service_item_id)
+        if service_item and service_item.get("duration_minutes") is not None:
+            duration_minutes = int(service_item["duration_minutes"])
+
+    if duration_minutes is None:
+        raw_duration = service.get("duration_minutes")
+        duration_minutes = int(raw_duration) if raw_duration is not None else 60
     slot_interval_minutes = int(setting.get("slot_interval_minutes") or 30)
 
     exception = _find_exception_for_date(

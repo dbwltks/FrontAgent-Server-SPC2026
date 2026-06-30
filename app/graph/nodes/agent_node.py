@@ -15,7 +15,7 @@ from app.providers.langchain_provider import (
     get_voice_response_style,
     history_to_messages,
 )
-from app.rag.retriever import retrieve_knowledge
+from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.rule_repo import get_active_rules
 from app.tasks.repository import TaskRepository
 from app.tasks.runner import DynamicTaskRunner
@@ -29,7 +29,22 @@ AGENT_SYSTEM_PROMPT_HEADER = """
 
 도구 사용 원칙:
 - 가격·정책·서비스 설명 등 지식 베이스 확인이 필요하면 search_knowledge를 호출한다.
-- 예약 생성·조회·취소·변경처럼 실제 상태를 바꾸는 요청이면 run_task를 호출한다.
+  "예약 변경 가능한가요?", "당일 취소되나요?", "주차 가능한가요?"처럼 일반적인
+  정책/조건을 묻는 질문형 문장은 정보 문의이므로 search_knowledge를 호출한다.
+- 예약 생성·조회·취소·변경을 실제로 지금 실행해 달라는 요청이면 run_task를
+  호출한다. "예약하고 싶어요", "OO 예약할게요", "예약해주세요", "변경할게요"처럼
+  사용자가 그 행동을 직접 하겠다는 의도가 명확할 때만 호출한다.
+  날짜·시간·서비스 종류 같은 세부 정보가 아직 없어도 절대 먼저 직접 물어보지
+  말고 무조건 바로 run_task를 호출한다. 그 정보를 모으는 질문은 네가 만드는
+  것이 아니라 run_task 호출 결과(이미 다음 질문을 포함하고 있다)를 그대로
+  전달하는 것이다.
+- "~가능한가요?", "~되나요?", "~할 수 있어요?"처럼 일반 조건을 묻는 의문문은
+  run_task가 아니라 search_knowledge로 보낸다. run_task는 사용자가 지금 바로
+  그 작업을 시작/이어가려 할 때만 쓴다.
+- [현재 요청 상태]에 "진행 중인 Task가 있습니다"라고 나와 있으면, 이번 사용자
+  메시지는 그 예약을 이어가기 위한 답변(날짜, 시간, 서비스명, 인원수 등)일
+  가능성이 매우 높다. 이 경우에도 task_type을 reservation_create로 그대로
+  run_task를 다시 호출한다 - 직접 답하지 말고 항상 run_task에 맡긴다.
 - 사람(상담원/직원) 연결을 명시적으로 요청하면 request_handoff를 호출한다.
 - 상담·대화·통화를 끝내려는 의도("끊어줘", "통화 종료", "채팅 그만", "여기까지",
   "그만할게요", "이제 됐어요" 등)가 보이면 end_session을 호출한다.
@@ -67,12 +82,14 @@ class EndSessionArgs(BaseModel):
     )
 
 
-async def _search_knowledge_tool_fn(organization_id: str, query: str) -> str:
+async def _unused_tool_executor(*_args, **_kwargs) -> str:
     """
-    StructuredTool에 등록만 되고 실제로는 호출되지 않는다(모델이 만든
-    tool_call을 agent_node가 직접 가로채 search_knowledge 분기를 처리하기
-    때문). LangChain StructuredTool.from_function이 coroutine을 요구해서
-    자리만 채우는 placeholder다.
+    네 tool(search_knowledge/run_task/request_handoff/end_session) 모두
+    StructuredTool.from_function에 등록만 되고 실제 LangChain 실행 경로로는
+    호출되지 않는다 - 모델이 만든 tool_call을 agent_node가 직접 가로채
+    tool_name으로 분기 처리하기 때문이다. LangChain StructuredTool.
+    from_function이 coroutine 인자를 필수로 요구해서 자리만 채우는
+    placeholder다.
     """
     return ""
 
@@ -141,28 +158,65 @@ def build_agent_instructions(response_instructions: str) -> str:
     return f"{AGENT_SYSTEM_PROMPT_HEADER}\n\n[응답 지시문]\n{response_instructions}"
 
 
+# coroutine은 모델이 만든 tool_call을 agent_node가 직접 가로채 분기 처리하므로
+# 실제로 호출되지 않는 placeholder다(_unused_tool_executor 참고) - 클로저로
+# 캡처할 상태가 없으므로 매 턴 재생성할 필요 없이 모듈 레벨로 한 번만 만든다.
+AGENT_TOOLS = [
+    StructuredTool.from_function(
+        coroutine=_unused_tool_executor,
+        name="search_knowledge",
+        description="가격, 서비스 설명, 정책 등 지식 베이스를 검색한다.",
+        args_schema=SearchKnowledgeArgs,
+    ),
+    StructuredTool.from_function(
+        coroutine=_unused_tool_executor,
+        name="run_task",
+        description="예약 생성/조회/취소/변경을 시작하거나 이어간다.",
+        args_schema=RunTaskArgs,
+    ),
+    StructuredTool.from_function(
+        coroutine=_unused_tool_executor,
+        name="request_handoff",
+        description="사람(상담원/직원) 연결을 요청한다.",
+        args_schema=RequestHandoffArgs,
+    ),
+    StructuredTool.from_function(
+        coroutine=_unused_tool_executor,
+        name="end_session",
+        description="사용자가 상담·대화·통화를 끝내려고 할 때 호출한다.",
+        args_schema=EndSessionArgs,
+    ),
+]
+AGENT_TOOLS_BY_NAME = {tool.name: tool for tool in AGENT_TOOLS}
+
+
 async def agent_node(state: AgentState) -> dict:
     """
     conversation_node + decision_node + rule_node + knowledge_node + task_node +
     response_node가 하던 일을 하나의 Main LLM 호출(+ 필요시 tool 1회 호출)로
     합친다. OpenAI native function calling을 쓴다 - 모델이 직접 search_knowledge/
-    run_task/request_handoff 중 무엇을 부를지 판단하므로, 의도 분류용 별도
-    LLM 호출이나 그래프 분기 노드가 필요 없다.
+    run_task/request_handoff/end_session 중 무엇을 부를지 판단하므로, 의도
+    분류용 별도 LLM 호출이나 그래프 분기 노드가 필요 없다.
 
     노드 자체의 호출 순서는:
-    1. 활성 규칙 조회(캐시) + 응답 지시문 조립
+    1. 활성 규칙 조회(캐시) + 응답 지시문 조립 (병렬)
     2. tool을 묶은 1차 LLM 스트리밍 호출
     3. tool 호출이 없으면 1차 응답이 곧 최종 답변(이미 스트리밍됨)
-    4. tool 호출이 있으면 tool 실행 후 결과를 메시지에 추가해 2차 스트리밍
-       호출로 최종 답변을 받는다(OpenAI tool calling 표준 2-step 패턴).
+    4. tool 호출이 있으면 tool을 직접 실행하고, 그 결과를 다시 LLM에 보내
+       답변을 재작성시키지 않는다 - tool 결과(검색된 지식, task 노드의 안내
+       문구)를 가공 없이 그대로 최종 답변으로 쓴다. 이러면 LLM round-trip이
+       항상 1회로 끝나 체감 지연이 절반 가까이 줄어든다(자연스러운 문장
+       재구성은 포기한 트레이드오프).
     """
     organization_id = state["organization_id"]
     session_id = state["session_id"]
     user_message = state["user_message"]
     conversation_history = history_from_state_messages(state.get("messages", []))
 
-    rules = await get_active_rules_async(organization_id)
-    voice_response_style = await get_voice_response_style(organization_id)
+    rules, voice_response_style = await asyncio.gather(
+        get_active_rules_async(organization_id),
+        get_voice_response_style(organization_id),
+    )
     response_instructions = build_response_instructions(
         intent=None,
         knowledge_context=[],
@@ -177,33 +231,7 @@ async def agent_node(state: AgentState) -> dict:
     instructions = build_agent_instructions(response_instructions)
 
     model = await get_streaming_chat_model(organization_id)
-    tools = [
-        StructuredTool.from_function(
-            coroutine=lambda query: _search_knowledge_tool_fn(organization_id, query),
-            name="search_knowledge",
-            description="가격, 서비스 설명, 정책 등 지식 베이스를 검색한다.",
-            args_schema=SearchKnowledgeArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=lambda task_type: _run_task(organization_id, session_id, user_message, task_type),
-            name="run_task",
-            description="예약 생성/조회/취소/변경을 시작하거나 이어간다.",
-            args_schema=RunTaskArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=lambda reason: _search_knowledge_tool_fn(organization_id, reason),
-            name="request_handoff",
-            description="사람(상담원/직원) 연결을 요청한다.",
-            args_schema=RequestHandoffArgs,
-        ),
-        StructuredTool.from_function(
-            coroutine=lambda farewell_message: _search_knowledge_tool_fn(organization_id, farewell_message),
-            name="end_session",
-            description="사용자가 상담·대화·통화를 끝내려고 할 때 호출한다.",
-            args_schema=EndSessionArgs,
-        ),
-    ]
-    model_with_tools = model.bind_tools(tools)
+    model_with_tools = model.bind_tools(AGENT_TOOLS)
 
     messages = history_to_messages(conversation_history) + [{"role": "user", "content": user_message}]
     system_and_messages = [{"role": "system", "content": instructions}] + messages
@@ -255,10 +283,7 @@ async def agent_node(state: AgentState) -> dict:
     except json.JSONDecodeError:
         tool_args = {}
 
-    tool_by_name = {tool.name: tool for tool in tools}
-    tool = tool_by_name.get(tool_name)
-
-    if tool is None or tool_name not in ("search_knowledge", "run_task", "request_handoff", "end_session"):
+    if tool_name not in AGENT_TOOLS_BY_NAME:
         return {
             "intent": "general",
             "next_action": "respond_general",
@@ -307,14 +332,15 @@ async def agent_node(state: AgentState) -> dict:
         ]
 
         # tool 결과를 받아 답변을 다시 작성하는 2차 LLM 호출을 생략한다 -
-        # 검색된 chunk 내용을 가볍게 이어붙인 텍스트를 그대로 최종 답변으로
-        # 쓴다. 자연스러운 문장 재구성은 포기하지만 LLM round-trip을 1번
-        # 줄여 체감 지연을 절반 가까이 낮춘다.
-        direct_message = (
-            "\n".join(c.get("content") or "" for c in chunks).strip()
-            if chunks
-            else "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
-        )
+        # 검색된 chunk 내용을 그대로 최종 답변으로 쓴다. 자연스러운 문장
+        # 재구성은 포기하지만 LLM round-trip을 1번 줄여 체감 지연을 절반
+        # 가까이 낮춘다. 다만 chunk를 전부 이어붙이면(특히 음성 통화에서)
+        # 마크다운 헤더나 중복 chunk까지 그대로 다 읽어버려 듣기 힘들어지므로
+        # (실측: 494자) 가장 유사도 높은 chunk 1개만, 그것도 일정 길이로
+        # 잘라서 쓴다.
+        direct_message = summarize_knowledge_chunk(chunks[0]) if chunks else None
+        if not direct_message:
+            direct_message = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
         writer({"type": "ai_response_delta", "delta": direct_message})
         return {
             "intent": intent,
@@ -345,6 +371,16 @@ async def agent_node(state: AgentState) -> dict:
             direct_message = "요청하신 내용을 처리하지 못했습니다. 다시 한 번 말씀해 주시겠어요?"
 
         writer({"type": "ai_response_delta", "delta": direct_message})
+
+        # task_status가 waiting_user_input이면 다음 사용자 메시지도 이
+        # 예약을 이어가야 한다 - checkpointer가 영속화하는 active_task/
+        # task_step을 계속 켜둔다. 그래야 다음 턴에 LLM이 (혹시 run_task를
+        # 다시 호출하지 않더라도) 시스템 프롬프트의 [현재 요청 상태]를 통해
+        # "진행 중인 Task가 있다"는 것을 인지한다. completed/failed면 이
+        # 턴에서 태스크가 끝난 것이므로 초기화한다.
+        task_status = task_result.get("status")
+        still_active = task_status == "waiting_user_input"
+
         return {
             "intent": intent,
             "next_action": next_action,
@@ -352,8 +388,10 @@ async def agent_node(state: AgentState) -> dict:
             "use_knowledge": False,
             "should_use_knowledge": False,
             "should_end_session": False,
+            "active_task": "reservation" if still_active else None,
+            "task_step": task_result.get("current_node_key") if still_active else None,
             "task_result": task_result,
-            "task_status": task_result.get("status"),
+            "task_status": task_status,
             "final_response": direct_message,
             "rules": rules,
             "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],

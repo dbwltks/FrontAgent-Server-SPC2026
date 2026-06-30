@@ -124,6 +124,44 @@ class DynamicTaskRunner:
                     trace=trace,
                 )
 
+            # instruction 노드는 보통 사용자 메시지를 봐야만 슬롯 충족 여부를
+            # 판단할 수 있어 매 턴 LLM을 호출한다. 하지만 "이 슬롯 자체가 이
+            # service_item에 필요 없다"처럼 사용자 메시지와 무관하게 코드로
+            # 바로 결정되는 케이스(branch_condition이 채워진 경우)는 LLM 호출
+            # 없이 곧장 다음 노드로 넘어간다 - LLM 판단에 맡기면(예: instruction
+            # 텍스트로 "필요 없으면 스킵해라"를 지시) 지시를 놓치는 사례가
+            # 실측됐다(예약 인원수가 무의미한 청소 서비스에도 매번 물어봄).
+            #
+            # branch_condition이 빈 문자열인 instruction 노드가 압도적으로
+            # 많고(대부분의 ask_* 노드), evaluate_condition_expression은 빈
+            # 조건을 항상 True로 취급하므로 반드시 조건이 채워진 경우에만
+            # 이 사전 평가를 적용한다 - 그렇지 않으면 모든 instruction 노드가
+            # LLM 호출 없이 즉시 branch_node_key로 건너뛰는 회귀가 생긴다.
+            node_config = node.get("config") or {}
+            pre_branch_condition = node_config.get("branch_condition")
+            if (
+                node.get("node_type") == "instruction"
+                and self._get_next_step_mode(node) == "branch"
+                and pre_branch_condition
+                and pre_branch_condition.strip()
+                and evaluate_condition_expression(pre_branch_condition, variables)
+            ):
+                next_node_key = node_config.get("branch_node_key")
+                if self._node_key_exists(flow_id, next_node_key):
+                    trace.append(
+                        {
+                            "node_key": current_node_key,
+                            "node_label": node.get("label"),
+                            "node_type": node.get("node_type"),
+                            "status": "skipped",
+                            "next_behavior": "evaluate_edges",
+                            "memory_updates": [],
+                            "error": None,
+                        }
+                    )
+                    current_node_key = next_node_key
+                    continue
+
             user_input_for_current_node = (
                 user_message
                 if was_waiting_for_input or node.get("node_type") == "instruction"
