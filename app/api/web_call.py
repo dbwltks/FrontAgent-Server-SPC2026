@@ -481,7 +481,10 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
     1개만 짧게 정리해서 넘긴다(app/graph/nodes/agent_node.py의 텍스트
     파이프라인과 동일한 처리).
     """
-    chunks = await retrieve_knowledge(organization_id=req.organization_id, query=req.message)
+    # 가장 유사도 높은 chunk 1개만 쓰므로 match_count=1로 호출한다 - 기본값(5)
+    # 그대로면 Supabase RPC가 불필요하게 20개(5 * OVERFETCH_MULTIPLIER)를
+    # 가져와 4개를 버린다.
+    chunks = await retrieve_knowledge(organization_id=req.organization_id, query=req.message, match_count=1)
 
     answer = summarize_knowledge_chunk(chunks[0]) if chunks else None
     if not answer:
