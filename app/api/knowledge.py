@@ -16,10 +16,10 @@ from app.rag.text_extractor import extract_text_from_file
 from app.repositories.knowledge_repo import (
     list_knowledge_sources,
     get_knowledge_source,
+    get_knowledge_source_by_checksum,
     update_knowledge_source,
     delete_knowledge_source,
     list_knowledge_chunks,
-    delete_knowledge_chunks,
 )
 from app.repositories.knowledge_storage import (
     build_knowledge_storage_path,
@@ -136,6 +136,27 @@ async def upload_knowledge(
 
                 temp_file.write(chunk)
 
+        checksum_sha256 = checksum.hexdigest()
+
+        existing_source = await asyncio.to_thread(
+            get_knowledge_source_by_checksum,
+            organization_id,
+            checksum_sha256,
+        )
+
+        if existing_source:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "이미 등록된 지식 파일입니다.",
+                    "source_id": existing_source.get("id"),
+                    "title": existing_source.get("title"),
+                    "file_name": existing_source.get("file_name"),
+                    "status": existing_source.get("status"),
+                },
+            )
+
+
         source_id = str(uuid4())
         mime_type = content_type_for_file(original_file_name, file.content_type)
         storage_path = build_knowledge_storage_path(
@@ -156,7 +177,7 @@ async def upload_knowledge(
             storage_bucket=settings.knowledge_storage_bucket,
             storage_path=storage_path,
             file_size=uploaded_bytes,
-            checksum_sha256=checksum.hexdigest(),
+            checksum_sha256=checksum_sha256,
             status="uploading",
         )
         source_created = True
