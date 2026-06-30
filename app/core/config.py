@@ -8,6 +8,10 @@ class Settings(BaseSettings):
 
     openai_api_key: str
     openai_model: str = "gpt-4.1-mini"
+    # intent 분류(prepare_node/decision_node) 전용 기본 모델. 응답 생성용
+    # openai_model보다 가볍고 빨라야 한다 - organizations.decision_model이
+    # 비어 있을 때 이 값으로 fallback한다(기존에는 openai_model 그대로 썼음).
+    decision_model: str = "gpt-4o-mini"
     openai_realtime_model: str = "gpt-realtime-2"
     openai_realtime_voice: str = "marin"
     voice_mode: str = "pipeline"

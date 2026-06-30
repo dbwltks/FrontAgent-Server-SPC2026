@@ -201,6 +201,10 @@ async def execute_instruction_node(
                 },
             ],
             temperature=0,
+            # JSON 강제 모드: 모델이 서두/검증 토큰 없이 곧바로 JSON을 생성해
+            # 응답 시간을 줄인다. 프롬프트만으로 "JSON만 응답"을 지시하던 기존
+            # 방식보다 안정적으로 빠르다.
+            response_format={"type": "json_object"},
         )
 
         content = response.choices[0].message.content or "{}"
