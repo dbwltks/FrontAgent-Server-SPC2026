@@ -31,7 +31,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://front-agent-ai.vercel.app"],
+    allow_origins=[
+        "https://front-agent-ai.vercel.app",
+        "https://callbee.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
