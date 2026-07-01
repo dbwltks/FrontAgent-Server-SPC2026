@@ -5,15 +5,26 @@ from unittest.mock import patch
 import io
 import wave
 
+from app.api.organization_ai_settings import (
+    ELEVENLABS_REALTIME_MODELS,
+    REALTIME_MODELS_BY_PROVIDER,
+    REALTIME_VOICES_BY_PROVIDER,
+    normalize_update_data,
+    OrganizationAISettingsUpdateRequest,
+)
 from app.api.voice import (
     ELEVENLABS_PCM_RATE,
     _pcm16_to_wav,
     build_realtime_session_config,
+    create_elevenlabs_realtime_session,
     get_voice_mode,
     normalize_text_for_korean_speech,
+    resolve_elevenlabs_agent_id,
+    resolve_realtime_provider,
     resolve_tts_config,
     split_tts_segments,
     tts_log_fields,
+    voice_config,
 )
 
 
@@ -22,7 +33,7 @@ class VoiceRealtimeTests(unittest.TestCase):
         session = build_realtime_session_config()
 
         self.assertEqual(session["type"], "realtime")
-        self.assertEqual(session["tool_choice"], "required")
+        self.assertEqual(session["tool_choice"], "auto")
         self.assertEqual(session["tools"][0]["name"], "query_agent")
         self.assertEqual(
             session["audio"]["input"]["turn_detection"]["type"],
@@ -59,6 +70,124 @@ class VoiceRealtimeTests(unittest.TestCase):
             normalize_text_for_korean_speech("010-1234-5678로 연락 주세요."),
             "공일공 일이삼사 오육칠팔로 연락 주세요.",
         )
+
+    def test_voice_config_exposes_elevenlabs_tts_fields(self):
+        with patch(
+            "app.api.voice.get_ai_settings",
+            return_value={
+                "voice_enabled": True,
+                "voice_mode": "realtime",
+                "voice_stt_provider": "openai",
+                "voice_stt_model": "gpt-4o-transcribe",
+                "voice_tts_provider": "elevenlabs",
+                "elevenlabs_model": "eleven_flash_v2_5",
+                "elevenlabs_voice_id": "voice_123",
+                "realtime_model": "gpt-realtime-2",
+                "realtime_voice": "marin",
+                "voice_response_style": "friendly_short",
+            },
+        ):
+            import asyncio
+
+            config = asyncio.run(voice_config("org_1"))
+
+        self.assertEqual(config["mode"], "realtime")
+        self.assertEqual(config["realtime_provider"], "elevenlabs")
+        self.assertEqual(config["tts_provider"], "elevenlabs")
+        self.assertEqual(config["elevenlabs_model"], "eleven_flash_v2_5")
+        self.assertEqual(config["elevenlabs_voice_id"], "voice_123")
+        self.assertEqual(config["realtime_elevenlabs_session_url"], "/voice/realtime/elevenlabs-session")
+
+    def test_resolves_elevenlabs_realtime_provider_from_tts_provider(self):
+        self.assertEqual(resolve_realtime_provider({"voice_tts_provider": "openai"}), "openai")
+        self.assertEqual(resolve_realtime_provider({"voice_tts_provider": "elevenlabs"}), "elevenlabs")
+
+    def test_resolves_elevenlabs_realtime_provider_from_realtime_model(self):
+        self.assertEqual(
+            resolve_realtime_provider(
+                {
+                    "voice_tts_provider": "openai",
+                    "realtime_model": "elevenlabs-conversational-ai",
+                }
+            ),
+            "elevenlabs",
+        )
+
+    def test_realtime_options_include_elevenlabs_model_and_voice_endpoint_shape(self):
+        self.assertIn("elevenlabs-conversational-ai", ELEVENLABS_REALTIME_MODELS)
+        self.assertEqual(
+            REALTIME_MODELS_BY_PROVIDER["elevenlabs"],
+            ["elevenlabs-conversational-ai"],
+        )
+        self.assertEqual(REALTIME_VOICES_BY_PROVIDER["elevenlabs"], [])
+
+    def test_selecting_elevenlabs_realtime_model_sets_elevenlabs_provider(self):
+        data = normalize_update_data(
+            OrganizationAISettingsUpdateRequest(
+                realtime_model="elevenlabs-conversational-ai",
+            )
+        )
+
+        self.assertEqual(data["realtime_model"], "elevenlabs-conversational-ai")
+        self.assertEqual(data["voice_tts_provider"], "elevenlabs")
+
+    def test_resolves_elevenlabs_agent_id(self):
+        self.assertEqual(
+            resolve_elevenlabs_agent_id({"elevenlabs_agent_id": " agent_123 "}),
+            "agent_123",
+        )
+
+    def test_creates_elevenlabs_realtime_signed_url(self):
+        class FakeResponse:
+            is_success = True
+            status_code = 200
+            text = '{"signed_url":"wss://example"}'
+
+            def json(self):
+                return {"signed_url": "wss://example"}
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url, headers, params):
+                self.url = url
+                self.headers = headers
+                self.params = params
+                return FakeResponse()
+
+        with (
+            patch(
+                "app.api.voice.get_ai_settings",
+                return_value={
+                    "voice_enabled": True,
+                    "voice_mode": "realtime",
+                    "voice_tts_provider": "elevenlabs",
+                    "elevenlabs_agent_id": "agent_123",
+                },
+            ),
+            patch("app.api.voice.settings.elevenlabs_api_key", "secret"),
+            patch("app.api.voice.httpx.AsyncClient", FakeClient),
+            patch("app.api.voice.create_usage_log_background"),
+        ):
+            import asyncio
+
+            response = asyncio.run(
+                create_elevenlabs_realtime_session(
+                    organization_id="org_1",
+                    session_id="sess_1",
+                )
+            )
+
+        self.assertEqual(response.provider, "elevenlabs")
+        self.assertEqual(response.agent_id, "agent_123")
+        self.assertEqual(response.signed_url, "wss://example")
 
 
 class StreamingTtsSegmentTests(unittest.TestCase):

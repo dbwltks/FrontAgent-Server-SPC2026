@@ -52,10 +52,7 @@ def get_value_by_path(data: dict[str, Any], path: str | None) -> Any:
     return current
 
 
-def evaluate_condition_expression(expression: str | None, variables: dict[str, Any]) -> bool:
-    if not expression or not expression.strip():
-        return True
-
+def _evaluate_single(expression: str, variables: dict[str, Any]) -> bool:
     normalized = expression.strip()
 
     for operator in _COMPARISON_OPERATORS:
@@ -86,6 +83,21 @@ def evaluate_condition_expression(expression: str | None, variables: dict[str, A
             return actual_value < expected_value
 
     return bool(get_value_by_path(variables, normalized))
+
+
+def evaluate_condition_expression(expression: str | None, variables: dict[str, Any]) -> bool:
+    if not expression or not expression.strip():
+        return True
+
+    # && 로 연결된 복합 조건: 전부 True여야 True
+    if "&&" in expression:
+        return all(_evaluate_single(part, variables) for part in expression.split("&&"))
+
+    # || 로 연결된 복합 조건: 하나라도 True면 True
+    if "||" in expression:
+        return any(_evaluate_single(part, variables) for part in expression.split("||"))
+
+    return _evaluate_single(expression, variables)
 
 
 def evaluate_edge_condition(

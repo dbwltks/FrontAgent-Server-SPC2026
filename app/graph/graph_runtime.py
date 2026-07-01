@@ -50,6 +50,39 @@ async def _warm_up_llm_clients() -> None:
     await asyncio.gather(*[_warm_up_chat_model(name, streaming) for name, streaming in model_combos])
 
 
+async def _warm_up_external_clients() -> None:
+    """
+    LLM과 같은 이유로, 지식검색 경로에서만 쓰이는 외부 연동(임베딩 API,
+    Supabase RPC, Redis)도 첫 실제 호출 때 TLS 핸드셰이크/connection 초기화
+    비용이 든다. 응답형 일반 대화는 LLM 워밍업만으로 체감 콜드스타트가
+    거의 사라졌지만, 지식검색 첫 요청은 이 셋이 워밍업되지 않아 여전히
+    수 초가 더 걸렸다(실측) - 서버 기동 시점에 미리 치른다.
+    """
+    from app.core.db import supabase
+    from app.core.redis import redis_bytes_client
+    from app.providers.embedding_provider import async_client as embedding_client
+
+    async def _warm_up_embedding() -> None:
+        try:
+            await embedding_client.embeddings.create(model="text-embedding-3-small", input="ping")
+        except Exception:
+            logger.warning("embedding warm-up failed", exc_info=True)
+
+    async def _warm_up_supabase() -> None:
+        try:
+            await asyncio.to_thread(lambda: supabase.table("organizations").select("id").limit(1).execute())
+        except Exception:
+            logger.warning("supabase warm-up failed", exc_info=True)
+
+    async def _warm_up_redis() -> None:
+        try:
+            await asyncio.to_thread(redis_bytes_client.ping)
+        except Exception:
+            logger.warning("redis warm-up failed", exc_info=True)
+
+    await asyncio.gather(_warm_up_embedding(), _warm_up_supabase(), _warm_up_redis())
+
+
 async def _sweep_idle_conversations() -> None:
     """
     채팅 무응답 안내/종료, 통화 무응답 종료(클라이언트가 /voice/call/end를
@@ -97,7 +130,11 @@ async def lifespan_graph(_app=None):
 
     agent_graph = build_graph(checkpointer=checkpointer)
     sweep_task = asyncio.create_task(_sweep_idle_conversations())
+    # 두 워밍업을 asyncio.gather로 동시에 돌리면(같은 프로세스에서 OpenAI로
+    # 향하는 TLS 핸드셰이크가 동시에 여러 개 발생) 워밍업 자체도 느려지고
+    # 그 직후 첫 실제 요청까지 같이 느려지는 경합이 실측됐다 - 순차 실행한다.
     await _warm_up_llm_clients()
+    await _warm_up_external_clients()
 
     try:
         yield

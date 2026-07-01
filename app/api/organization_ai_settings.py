@@ -47,8 +47,8 @@ TTS_VOICES_BY_MODEL = {
     "tts-1-hd": ["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"],
 }
 
+# Realtime은 OpenAI Realtime API만 지원한다.
 REALTIME_MODELS = ["gpt-realtime-2"]
-# Realtime은 tts-1/gpt-4o-mini-tts와 보이스 목록이 다르다(fable/nova/onyx 없음, ballad/verse 있음).
 REALTIME_VOICES = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
 
 ELEVENLABS_VOICES_URL = "https://api.elevenlabs.io/v2/voices"
@@ -182,6 +182,8 @@ def get_organization_ai_settings(organization_id: str):
             "tts_voices_by_model": TTS_VOICES_BY_MODEL,
             "realtime_models": REALTIME_MODELS,
             "realtime_voices": REALTIME_VOICES,
+            "elevenlabs_models": TTS_MODELS_BY_PROVIDER["elevenlabs"],
+            "elevenlabs_voices_endpoint": "/organization-ai-settings/elevenlabs-voices",
             "voice_response_styles": sorted(ALLOWED_VOICE_RESPONSE_STYLES),
             "recommended_templates": [
                 {
@@ -216,6 +218,7 @@ def get_organization_ai_settings(organization_id: str):
                 {
                     "name": "Realtime Voice",
                     "voice_mode": "realtime",
+                    "voice_tts_provider": "openai",
                     "realtime_model": "gpt-realtime-2",
                     "realtime_voice": "marin",
                     "voice_response_style": "friendly_short",
