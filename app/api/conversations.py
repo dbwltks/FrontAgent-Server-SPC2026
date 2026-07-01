@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.graph.nodes.conversation_node import invalidate_conversation_cache
 from app.repositories.conversation_repo import (
     list_conversations,
     get_conversation,
@@ -11,6 +12,7 @@ from app.repositories.conversation_repo import (
     close_conversation,
     update_conversation_ai_enabled,
 )
+from app.tasks.repository import TaskRepository
 
 
 router = APIRouter(tags=["Conversations"])
@@ -196,6 +198,14 @@ def close_conversation_api(
             status_code=404,
             detail="Conversation not found",
         )
+
+    session_id = conversation.get("session_id")
+    if session_id:
+        TaskRepository().cancel_active_sessions(
+            organization_id=organization_id,
+            session_id=session_id,
+        )
+        invalidate_conversation_cache(organization_id, session_id)
 
     return conversation
 

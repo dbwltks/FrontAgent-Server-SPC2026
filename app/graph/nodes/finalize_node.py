@@ -1,6 +1,7 @@
 import logging
 import threading
 
+from app.graph.nodes.conversation_node import invalidate_conversation_cache
 from app.graph.state import AgentState
 from app.repositories.agent_run_repo import create_agent_run
 from app.repositories.conversation_repo import (
@@ -10,6 +11,7 @@ from app.repositories.conversation_repo import (
     update_conversation_last_message,
 )
 from app.repositories.knowledge_repo import increment_reference_counts
+from app.tasks.repository import TaskRepository
 
 
 logger = logging.getLogger(__name__)
@@ -89,6 +91,11 @@ def _end_session_if_requested(state: AgentState) -> None:
                 organization_id=organization_id,
                 conversation_id=conversation_id,
             )
+        TaskRepository().cancel_active_sessions(
+            organization_id=organization_id,
+            session_id=session_id,
+        )
+        invalidate_conversation_cache(organization_id, session_id)
     except Exception:
         logger.warning(
             "end_session handling failed: organization_id=%s session_id=%s conversation_id=%s channel=%s",

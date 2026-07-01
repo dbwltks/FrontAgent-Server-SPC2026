@@ -603,6 +603,52 @@ def get_reservation(
     return rows[0] if rows else None
 
 
+def update_reservation(
+    organization_id: str,
+    reservation_id: str,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    customer_name: str | None = None,
+    customer_phone: str | None = None,
+    customer_email: str | None = None,
+    memo: str | None = None,
+) -> dict:
+    """예약 시간/고객 정보/메모를 수정한다."""
+    reservation = get_reservation(organization_id, reservation_id)
+    if not reservation:
+        raise NotFoundError("Reservation not found")
+
+    patch: dict = {}
+    if start_at is not None:
+        patch["start_at"] = start_at.isoformat()
+    if end_at is not None:
+        patch["end_at"] = end_at.isoformat()
+    if customer_name is not None:
+        patch["customer_name"] = customer_name
+    if customer_phone is not None:
+        patch["customer_phone"] = customer_phone
+    if customer_email is not None:
+        patch["customer_email"] = customer_email
+    if memo is not None:
+        patch["memo"] = memo
+
+    if not patch:
+        return reservation
+
+    result = (
+        supabase.table("reservations")
+        .update(patch)
+        .eq("id", reservation_id)
+        .eq("organization_id", organization_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    if not rows:
+        raise ReservationRepoError("Failed to update reservation")
+    return rows[0]
+
+
 def confirm_reservation(
     organization_id: str,
     reservation_id: str,

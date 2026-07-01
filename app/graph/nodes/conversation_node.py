@@ -21,6 +21,10 @@ _CONVERSATION_CACHE_TTL_SECONDS = 30
 _conversation_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
+def invalidate_conversation_cache(organization_id: str, session_id: str) -> None:
+    _conversation_cache.pop((organization_id, session_id), None)
+
+
 def _get_or_create_conversation_cached(organization_id: str, session_id: str, channel: str) -> dict:
     cache_key = (organization_id, session_id)
     cached = _conversation_cache.get(cache_key)

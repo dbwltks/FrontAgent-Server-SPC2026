@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from app.core.config import settings
-from app.tasks.repository import invalidate_enabled_flow_cache
+from app.tasks.repository import invalidate_enabled_flow_cache, invalidate_flow_meta_cache
 from app.tasks.runner import DynamicTaskRunner
 
 
@@ -344,6 +344,7 @@ def delete_task_flow(flow_id: str):
     )
 
     invalidate_enabled_flow_cache(existing_rows[0]["organization_id"])
+    invalidate_flow_meta_cache(flow_id)
 
     return {
         "deleted": True,
@@ -383,6 +384,7 @@ def create_task_node(flow_id: str, request: TaskNodeCreateRequest):
             detail="Task node creation failed.",
         )
 
+    invalidate_flow_meta_cache(flow_id)
     return rows[0]
 
 
@@ -457,6 +459,7 @@ def update_task_node(
             detail="Task node not found.",
         )
 
+    invalidate_flow_meta_cache(flow_id)
     return rows[0]
 
 
@@ -478,6 +481,7 @@ def delete_task_node(flow_id: str, node_id: str):
         .execute()
     )
 
+    invalidate_flow_meta_cache(flow_id)
     return {
         "deleted": True,
         "flow_id": flow_id,
@@ -518,6 +522,7 @@ def create_task_edge(flow_id: str, request: TaskEdgeCreateRequest):
             detail="Task edge creation failed.",
         )
 
+    invalidate_flow_meta_cache(flow_id)
     return rows[0]
 
 
@@ -606,6 +611,7 @@ def update_task_edge(
             detail="Task edge not found.",
         )
 
+    invalidate_flow_meta_cache(flow_id)
     return rows[0]
 
 
@@ -627,6 +633,7 @@ def delete_task_edge(flow_id: str, edge_id: str):
         .execute()
     )
 
+    invalidate_flow_meta_cache(flow_id)
     return {
         "deleted": True,
         "flow_id": flow_id,

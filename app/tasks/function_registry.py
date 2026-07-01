@@ -8,6 +8,7 @@ import re
 import calendar
 
 from app.repositories.service_repo import (
+    get_service as catalog_get_service,
     get_service_item as repo_get_service_item,
     list_service_items,
     resolve_service_item_by_name,
@@ -88,6 +89,10 @@ def _read_path(source: dict[str, Any], key: str) -> Any:
             return None
 
     return current
+
+
+def _normalize_task_text(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "")
 
 
 def _get_value(
@@ -208,16 +213,27 @@ def _build_start_end(
     if not duration_minutes:
         organization_id = _get_value(params, variables, "organization_id")
         service_id = _get_value(params, variables, "service_id")
+        service_item_id = _get_value(params, variables, "service_item_id")
+
+        if organization_id and service_item_id:
+            service_item = repo_get_service_item(
+                organization_id=organization_id,
+                service_item_id=service_item_id,
+            )
+            if service_item:
+                duration_minutes = service_item.get("duration_minutes")
+                if not service_id:
+                    service_id = service_item.get("service_id")
 
         if organization_id and service_id:
             service = repo_get_service(
                 organization_id=organization_id,
                 service_id=service_id,
             )
-            duration_minutes = service.get("duration_minutes")
+            duration_minutes = duration_minutes or service.get("duration_minutes")
 
     if not duration_minutes:
-        return start_at, None
+        duration_minutes = 60
 
     end_at = start_at + timedelta(minutes=int(duration_minutes))
 
@@ -606,11 +622,9 @@ def reservation_list_services(
     Function Node용 서비스 목록 조회 함수.
     Task Flow에서 고객에게 예약 가능한 상품/서비스를 보여줄 때 사용한다.
 
-    고객이 실제로 골라야 하는 단위는 services(대분류, 예: "홈 클리닝")가
-    아니라 service_items(세부 예약 항목, 예: "이사 청소")다. resolve_service_
-    item도 service_items를 대상으로 이름을 매칭하므로, 여기서 대분류만
-    보여주면 고객 답변이 항상 매칭 실패로 되돌아간다(실측된 회귀). 세부
-    항목이 하나도 등록되지 않은 조직(과도기)만 대분류로 폴백한다.
+    대분류 서비스가 여러 개면 먼저 services를 고르게 하고, 대분류가 하나뿐이면
+    바로 service_items를 보여준다. 이미 service_id가 선택된 상태에서는 해당
+    service의 item만 반환한다.
     """
     organization_id = _get_value(params, variables, "organization_id")
 
@@ -624,13 +638,59 @@ def reservation_list_services(
         }
 
     try:
-        services = list_service_items(organization_id=organization_id)
+        selected_service_id = _get_value(
+            params,
+            variables,
+            "service_id",
+            "service_item_resolve_result.service_id",
+        )
 
-        if not services:
-            services = repo_list_services(organization_id=organization_id)
+        if selected_service_id:
+            items = list_service_items(organization_id=organization_id, service_id=selected_service_id)
+            return {
+                "ok": True,
+                "selection_type": "service_item",
+                "service_id": selected_service_id,
+                "services": items,
+                "count": len(items),
+            }
+
+        items = list_service_items(organization_id=organization_id)
+        services_by_id = {}
+        for item in items:
+            service_id = item.get("service_id")
+            if not service_id or service_id in services_by_id:
+                continue
+            service = catalog_get_service(organization_id=organization_id, service_id=service_id)
+            if service:
+                services_by_id[service_id] = service
+
+        services = list(services_by_id.values())
+
+        if len(services) == 1:
+            service_id = services[0].get("id")
+            service_items = list_service_items(organization_id=organization_id, service_id=service_id)
+            return {
+                "ok": True,
+                "selection_type": "service_item",
+                "service_id": service_id,
+                "services": service_items,
+                "count": len(service_items),
+            }
+
+        if services:
+            return {
+                "ok": True,
+                "selection_type": "service",
+                "services": services,
+                "count": len(services),
+            }
+
+        services = repo_list_services(organization_id=organization_id)
 
         return {
             "ok": True,
+            "selection_type": "service" if len(services) != 1 else "service_item",
             "services": services,
             "count": len(services),
         }
@@ -816,7 +876,7 @@ def reservation_resolve_service_item(
     variables: dict[str, Any],
 ) -> dict[str, Any]:
     organization_id = _get_value(params, variables, "organization_id")
-    service_id = _get_value(params, variables, "service_id")
+    service_id = _get_value(params, variables, "service_id", "service_item_resolve_result.service_id")
 
     service_item_text = _get_value(
         params,
@@ -844,6 +904,44 @@ def reservation_resolve_service_item(
             "message": "예약할 서비스명을 입력해주세요.",
             "service_item_id": None,
         }
+
+    available_services = variables.get("available_services") or {}
+    if not service_id and available_services.get("selection_type") == "service":
+        matched_services = [
+            service
+            for service in available_services.get("services") or []
+            if _normalize_task_text(service.get("name")) == _normalize_task_text(str(service_item_text))
+            or _normalize_task_text(service.get("name")) in _normalize_task_text(str(service_item_text))
+            or _normalize_task_text(str(service_item_text)) in _normalize_task_text(service.get("name"))
+        ]
+        if len(matched_services) == 1:
+            selected_service_id = matched_services[0].get("id")
+            items = list_service_items(organization_id=organization_id, service_id=selected_service_id)
+            item_selection = {
+                "ok": True,
+                "selection_type": "service_item",
+                "service_id": selected_service_id,
+                "service_name": matched_services[0].get("name"),
+                "services": items,
+                "count": len(items),
+            }
+            return {
+                "ok": False,
+                "resolved": False,
+                "selection_type": "service_item",
+                "service_id": selected_service_id,
+                "service_name": matched_services[0].get("name"),
+                "services": items,
+                "count": len(items),
+                "message": "서비스 항목을 선택해주세요.",
+                "service_item_id": None,
+                "_memory_updates": {
+                    "available_services": item_selection,
+                    "service_item_text": None,
+                    "service_item_id": None,
+                    "service_item_name": None,
+                },
+            }
 
     return resolve_service_item_by_name(
         organization_id=organization_id,

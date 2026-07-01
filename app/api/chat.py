@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.repositories.conversation_repo import get_conversation_by_session
 from app.repositories.organization_repo import resolve_organization_id
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
@@ -21,6 +22,11 @@ from app.services.agent_stream import (
 
 router = APIRouter(tags=["Chat"])
 logger = logging.getLogger(__name__)
+SESSION_CLOSED_DETAIL = {
+    "code": "SESSION_CLOSED",
+    "message": "This session is closed. Start a new session_id.",
+    "new_session_required": True,
+}
 
 
 class ChatMessageItem(BaseModel):
@@ -128,6 +134,15 @@ def build_chat_response_messages(
         )
 
     return messages
+
+
+def raise_if_session_closed(organization_id: str, session_id: str) -> None:
+    conversation = get_conversation_by_session(
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+    if conversation and conversation.get("status") == "closed":
+        raise HTTPException(status_code=409, detail=SESSION_CLOSED_DETAIL)
 
 
 async def stream_chat_response(req: ChatRequest):
@@ -252,6 +267,8 @@ async def chat(req: ChatRequest):
     stream=false면 그래프를 끝까지 실행한 뒤 최종 결과만 한 번에 반환한다.
     음성 채널은 STT로 텍스트를 만들어 이 엔드포인트를 호출하고, 응답 텍스트를 TTS로 합성한다.
     """
+    raise_if_session_closed(req.organization_id, req.session_id)
+
     if req.stream:
         return StreamingResponse(
             stream_chat_response(req),

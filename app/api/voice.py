@@ -9,9 +9,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.graph.nodes.conversation_node import invalidate_conversation_cache
+from app.api.chat import raise_if_session_closed
 from app.repositories.ai_usage_repo import create_usage_log_background
 from app.repositories.conversation_repo import end_call_conversation
 from app.repositories.organization_ai_settings_repo import get_ai_settings
+from app.tasks.repository import TaskRepository
 from app.services.voice_korean_text import (  # noqa: F401 (재노출, 기존 테스트 호환용)
     normalize_text_for_korean_speech,
     split_tts_segments,
@@ -204,6 +207,8 @@ async def process_voice_turn(
     session_id: str = Form(...),
     interrupt_context: str | None = Form(None),
 ):
+    raise_if_session_closed(organization_id, session_id)
+
     ai_settings = get_ai_settings(organization_id)
     if not ai_settings.get("voice_enabled", True):
         raise HTTPException(status_code=409, detail="Voice is disabled")
@@ -309,6 +314,8 @@ async def stream_pipeline_voice_turn(
     session_id: str = Form(...),
     interrupt_context: str | None = Form(None),
 ):
+    raise_if_session_closed(organization_id, session_id)
+
     ai_settings = get_ai_settings(organization_id)
     if not ai_settings.get("voice_enabled", True):
         raise HTTPException(status_code=409, detail="Voice is disabled")
@@ -354,6 +361,7 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
             "절대 함수를 호출하지 않고 아무 말도 하지 않는다. "
             "함수 결과를 받기 전에는 자체 지식으로 답하지 않는다. "
             "함수 결과를 받은 뒤에는 내용을 추가하거나 바꾸지 말고 실제 상담원처럼 자연스럽게 읽는다. "
+            "함수 결과의 answer가 빈 문자열이면 아무 말도 하지 않는다. "
             "함수 결과에 없는 세부 정보(옵션, 가격, 추가 항목 등)를 먼저 나서서 "
             "설명하지 않는다 - 사용자가 묻지 않은 정보는 한 번에 다 말하지 말고, "
             "통화이므로 한 번에 한 가지만 짧게 묻거나 답한다. "
@@ -363,9 +371,9 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
             "input": {
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.6,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
+                    "threshold": 0.8,
+                    "prefix_padding_ms": 200,
+                    "silence_duration_ms": 1000,
                     "create_response": True,
                     "interrupt_response": True,
                 },
@@ -485,7 +493,24 @@ async def end_voice_call(payload: CallEndRequest):
     )
 
     if conversation is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        TaskRepository().cancel_active_sessions(
+            organization_id=payload.organization_id,
+            session_id=payload.session_id,
+        )
+        invalidate_conversation_cache(payload.organization_id, payload.session_id)
+        return {
+            "conversation_id": None,
+            "call_started_at": None,
+            "call_ended_at": None,
+            "call_duration_seconds": None,
+            "already_closed": True,
+        }
+
+    TaskRepository().cancel_active_sessions(
+        organization_id=payload.organization_id,
+        session_id=payload.session_id,
+    )
+    invalidate_conversation_cache(payload.organization_id, payload.session_id)
 
     return {
         "conversation_id": conversation.get("id"),
