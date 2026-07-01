@@ -181,22 +181,7 @@ async def extract_and_sync_services_from_knowledge(
                     "catalog_error": catalog_error,
                     "catalog_preview": catalog_preview,
                 }
-
-            service_name = (
-                catalog_sync.get("service_name")
-                or catalog.get("service_name")
-            )
-
-            extracted_names = []
-            if service_name:
-                extracted_names.append(str(service_name).strip())
-
-            stale_services = mark_source_services_stale(
-                organization_id=organization_id,
-                source_id=knowledge_source_id,
-                extracted_names=extracted_names,
-            )
-
+            
             return {
                 "organization_id": organization_id,
                 "knowledge_source_id": knowledge_source_id,
@@ -205,15 +190,13 @@ async def extract_and_sync_services_from_knowledge(
                 "extracted_count": len(catalog_items),
                 "synced_count": catalog_sync.get("items_count", 0),
                 "options_count": catalog_sync.get("options_count", 0),
-                "stale_count": len(stale_services),
-                "items": [catalog_sync.get("service")]
-                if catalog_sync.get("service")
-                else [],
+                "stale_count": 0,
+                "items": [catalog_sync.get("service")] if catalog_sync.get("service") else [],
                 "catalog": catalog,
                 "catalog_sync": catalog_sync,
                 "catalog_items": catalog_sync.get("items", []),
                 "catalog_options": catalog_sync.get("options", []),
-                "stale_items": stale_services,
+                "stale_items": [],
             }
 
     except Exception as e:
