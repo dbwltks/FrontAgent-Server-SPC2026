@@ -68,6 +68,8 @@ class VoiceTurnResponse(BaseModel):
     end_call: bool = False
 
 
+
+
 def get_voice_mode(organization_id: str | None = None) -> str:
     if organization_id:
         mode = str(get_ai_settings(organization_id).get("voice_mode") or "").strip().lower()
@@ -81,27 +83,36 @@ def get_voice_mode(organization_id: str | None = None) -> str:
 async def voice_config(organization_id: str | None = None):
     if organization_id:
         ai_settings = get_ai_settings(organization_id)
+        tts_config = resolve_tts_config(ai_settings)
         return {
             "organization_id": organization_id,
             "enabled": ai_settings.get("voice_enabled", True),
             "mode": get_voice_mode(organization_id),
             "stt_provider": ai_settings.get("voice_stt_provider") or settings.stt_provider,
-            "stt_model": ai_settings.get("voice_stt_model"),
-            "tts_provider": resolve_tts_config(ai_settings)["provider"],
-            "tts_model": ai_settings.get("voice_tts_model"),
-            "tts_voice": ai_settings.get("voice_tts_voice"),
+            "stt_model": ai_settings.get("voice_stt_model") or settings.voice_stt_model,
+            "tts_provider": tts_config["provider"],
+            "tts_model": tts_config.get("model"),
+            "tts_voice": tts_config.get("voice"),
+            "elevenlabs_model": tts_config.get("elevenlabs_model"),
+            "elevenlabs_voice_id": tts_config.get("elevenlabs_voice_id"),
             "realtime_model": ai_settings.get("realtime_model"),
             "realtime_voice": ai_settings.get("realtime_voice"),
             "response_style": ai_settings.get("voice_response_style"),
             "upload": VOICE_UPLOAD_CONFIG,
         }
 
+    tts_config = resolve_tts_config(None)
     return {
         "mode": get_voice_mode(),
         "stt_provider": settings.stt_provider,
         "stt_model": settings.voice_stt_model,
-        "tts_model": settings.voice_tts_model,
-        "tts_voice": settings.voice_tts_voice,
+        "tts_provider": tts_config["provider"],
+        "tts_model": tts_config.get("model"),
+        "tts_voice": tts_config.get("voice"),
+        "elevenlabs_model": tts_config.get("elevenlabs_model"),
+        "elevenlabs_voice_id": tts_config.get("elevenlabs_voice_id"),
+        "realtime_model": settings.openai_realtime_model,
+        "realtime_voice": settings.openai_realtime_voice,
         "upload": VOICE_UPLOAD_CONFIG,
     }
 

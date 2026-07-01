@@ -11,7 +11,10 @@ class Settings(BaseSettings):
     # intent 분류(prepare_node/decision_node) 전용 기본 모델. 응답 생성용
     # openai_model보다 가볍고 빨라야 한다 - organizations.decision_model이
     # 비어 있을 때 이 값으로 fallback한다(기존에는 openai_model 그대로 썼음).
-    decision_model: str = "gpt-4o-mini"
+    decision_model: str = "gpt-4.1-mini"
+    # instruction 노드(태스크 값 추출/판단)용 모델. non-streaming JSON 호출이라
+    # 실측 결과 nano보다 mini가 더 빠르다(nano: 1,712ms, mini: 1,080ms).
+    task_instruction_model: str = "gpt-4.1-mini"
     openai_realtime_model: str = "gpt-realtime-2"
     openai_realtime_voice: str = "marin"
     voice_mode: str = "pipeline"

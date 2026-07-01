@@ -1,9 +1,12 @@
+import json
+import threading
 import time
 from typing import Any
 
 from supabase import Client
 
 from app.core.db import supabase as default_supabase_client
+from app.core.redis import redis_client
 
 
 ACTIVE_TASK_STATUSES = [
@@ -18,6 +21,23 @@ ACTIVE_TASK_STATUSES = [
 # 해당 organization 전체를 무효화한다.
 _ENABLED_FLOW_CACHE_TTL_SECONDS = 60
 _enabled_flow_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+
+# Redis 캐시 TTL
+_FLOW_META_TTL = 300        # 노드/엣지 메타데이터: 5분 (관리자 수정 후 최대 5분 지연)
+_TASK_SESSION_TTL = 1800    # 태스크 세션: 30분 (통화 중 유지)
+
+
+def _rkey_node(flow_id: str, node_key: str) -> str:
+    return f"task:node:{flow_id}:{node_key}"
+
+def _rkey_edges(flow_id: str, source_node_key: str) -> str:
+    return f"task:edges:{flow_id}:{source_node_key}"
+
+def _rkey_start_node(flow_id: str) -> str:
+    return f"task:start_node:{flow_id}"
+
+def _rkey_session(organization_id: str, session_id: str) -> str:
+    return f"task:session:{organization_id}:{session_id}"
 
 
 def invalidate_enabled_flow_cache(organization_id: str) -> None:
@@ -110,6 +130,16 @@ class TaskRepository:
         organization_id: str,
         session_id: str,
     ) -> dict[str, Any] | None:
+        # Redis 우선 조회 — 세션 생성/업데이트 시 Redis에 쓰므로 DB 왕복 불필요.
+        rkey = _rkey_session(organization_id, session_id)
+        cached = redis_client.get(rkey)
+        if cached:
+            session = json.loads(cached)
+            if session.get("status") in ACTIVE_TASK_STATUSES:
+                return session
+            return None
+
+        # Redis miss → DB fallback (서버 재시작 등 예외 상황)
         response = (
             self.client.table("task_sessions")
             .select("*")
@@ -120,8 +150,9 @@ class TaskRepository:
             .limit(1)
             .execute()
         )
-
         rows = response.data or []
+        if rows:
+            redis_client.setex(rkey, _TASK_SESSION_TTL, json.dumps(rows[0]))
         return rows[0] if rows else None
 
     def get_flow(self, flow_id: str) -> dict[str, Any] | None:
@@ -136,9 +167,11 @@ class TaskRepository:
         return response.data
 
     def get_start_node(self, flow_id: str) -> dict[str, Any] | None:
-        # MVP 기준:
-        # 1순위: node_key = "start"
-        # 2순위: 가장 먼저 생성된 노드
+        rkey = _rkey_start_node(flow_id)
+        cached = redis_client.get(rkey)
+        if cached:
+            return json.loads(cached)
+
         start_response = (
             self.client.table("task_nodes")
             .select("*")
@@ -147,9 +180,9 @@ class TaskRepository:
             .limit(1)
             .execute()
         )
-
         start_rows = start_response.data or []
         if start_rows:
+            redis_client.setex(rkey, _FLOW_META_TTL, json.dumps(start_rows[0]))
             return start_rows[0]
 
         response = (
@@ -160,8 +193,9 @@ class TaskRepository:
             .limit(1)
             .execute()
         )
-
         rows = response.data or []
+        if rows:
+            redis_client.setex(rkey, _FLOW_META_TTL, json.dumps(rows[0]))
         return rows[0] if rows else None
 
     def get_node_by_key(
@@ -169,6 +203,11 @@ class TaskRepository:
         flow_id: str,
         node_key: str,
     ) -> dict[str, Any] | None:
+        rkey = _rkey_node(flow_id, node_key)
+        cached = redis_client.get(rkey)
+        if cached:
+            return json.loads(cached)
+
         response = (
             self.client.table("task_nodes")
             .select("*")
@@ -177,14 +216,21 @@ class TaskRepository:
             .single()
             .execute()
         )
-
-        return response.data
+        node = response.data
+        if node:
+            redis_client.setex(rkey, _FLOW_META_TTL, json.dumps(node))
+        return node
 
     def list_edges_from(
         self,
         flow_id: str,
         source_node_key: str,
     ) -> list[dict[str, Any]]:
+        rkey = _rkey_edges(flow_id, source_node_key)
+        cached = redis_client.get(rkey)
+        if cached:
+            return json.loads(cached)
+
         response = (
             self.client.table("task_edges")
             .select("*")
@@ -193,8 +239,9 @@ class TaskRepository:
             .order("priority")
             .execute()
         )
-
-        return response.data or []
+        edges = response.data or []
+        redis_client.setex(rkey, _FLOW_META_TTL, json.dumps(edges))
+        return edges
 
     def create_session(
         self,
@@ -204,7 +251,9 @@ class TaskRepository:
         current_node_key: str,
         variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        payload = {
+        import uuid
+        session = {
+            "id": str(uuid.uuid4()),
             "organization_id": organization_id,
             "session_id": session_id,
             "flow_id": flow_id,
@@ -213,27 +262,40 @@ class TaskRepository:
             "variables": variables or {},
             "status": "running",
         }
+        # Redis에 즉시 쓰고 DB는 백그라운드로 영속화한다.
+        rkey = _rkey_session(organization_id, session_id)
+        redis_client.setex(rkey, _TASK_SESSION_TTL, json.dumps(session))
 
-        response = (
-            self.client.table("task_sessions")
-            .insert(payload)
-            .execute()
-        )
+        def _persist():
+            try:
+                self.client.table("task_sessions").insert(session).execute()
+            except Exception:
+                pass
+        threading.Thread(target=_persist, daemon=True).start()
 
-        rows = response.data or []
-        return rows[0]
+        return session
 
     def update_session(
         self,
         task_session_id: str,
         values: dict[str, Any],
+        *,
+        organization_id: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any] | None:
-        response = (
-            self.client.table("task_sessions")
-            .update(values)
-            .eq("id", task_session_id)
-            .execute()
-        )
+        # Redis 세션을 즉시 업데이트하고 DB는 백그라운드 영속화.
+        if organization_id and session_id:
+            rkey = _rkey_session(organization_id, session_id)
+            raw = redis_client.get(rkey)
+            if raw:
+                session = json.loads(raw)
+                session.update(values)
+                redis_client.setex(rkey, _TASK_SESSION_TTL, json.dumps(session))
 
-        rows = response.data or []
-        return rows[0] if rows else None
+        def _persist():
+            try:
+                self.client.table("task_sessions").update(values).eq("id", task_session_id).execute()
+            except Exception:
+                pass
+        threading.Thread(target=_persist, daemon=True).start()
+        return None

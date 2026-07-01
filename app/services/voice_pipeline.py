@@ -30,17 +30,20 @@ from app.services.voice_tts import (
 logger = logging.getLogger(__name__)
 
 
-def build_voice_agent_message(transcript: str, interrupt_context: str | None = None) -> str:
+def build_voice_agent_message(transcript: str, is_barge_in: bool = False) -> str:
+    """
+    이전 사용자 발화/AI 답변은 checkpointer가 thread_id 기준으로 messages를
+    이미 복원해주므로 여기서 다시 전달할 필요가 없다 - 끼어들기라는 사실(AI가
+    말하던 도중 끊겼다는 것)만 짧게 알려주면 LLM이 히스토리를 보고 판단한다.
+    """
     transcript = transcript.strip()
-    if not interrupt_context:
+    if not is_barge_in:
         return transcript
 
     return (
-        "[통화 끼어들기]\n"
-        "사용자가 이전 응답 또는 처리 중간에 다시 말했습니다. "
-        "이전 맥락을 유지하되 새 발화를 우선 반영해 자연스럽게 이어서 답변하세요.\n\n"
-        f"끼어든 발화: {transcript}\n"
-        f"프론트 컨텍스트: {interrupt_context}"
+        "[통화 끼어들기] 사용자가 이전 응답을 끝까지 듣지 않고 다시 말했습니다. "
+        "직전 대화 맥락을 참고해 새 발화를 우선 반영하여 자연스럽게 이어서 답변하세요.\n\n"
+        f"끼어든 발화: {transcript}"
     )
 
 
@@ -184,6 +187,13 @@ async def stream_pipeline_voice_turn_events(
             audio_index += 1
             tts_tasks.append(asyncio.create_task(synth_worker(index, segment_text)))
 
+        # STT 완료 직후 브릿지("잠시만요.") 합성을 index=0으로 시작한다.
+        # LLM과 병렬로 ~500ms 안에 완료되므로, LLM 루프 시작 직전에 await하면
+        # 대기 없이 즉시 클라이언트로 전송된다. 본답변은 index=1부터 이어진다.
+        bridge_task = asyncio.create_task(synth_worker(0, "잠시만요."))
+        audio_index += 1
+        tts_tasks.append(bridge_task)
+
         pending_audio_events: dict[int, str] = {}
         next_audio_index_to_emit = 0
 
@@ -235,6 +245,12 @@ async def stream_pipeline_voice_turn_events(
                 )
             )
 
+        # 브릿지 합성이 완료됐으면 즉시 발송, 아직이면 완료까지만 기다린다.
+        # 어느 경로든(일반/지식/태스크) 브릿지가 먼저 재생되고 본답변이 이어진다.
+        await bridge_task
+        for audio_event in drain_ready_audio():
+            yield audio_event
+
         async for event, data in stream_agent_graph_events(
             agent_graph=agent_graph,
             initial_state=initial_state,
@@ -247,9 +263,8 @@ async def stream_pipeline_voice_turn_events(
                 final_state = data
                 continue
             yield sse_event(event, data)
-            if event == "delta":
-                for audio_event in drain_ready_audio():
-                    yield audio_event
+            for audio_event in drain_ready_audio():
+                yield audio_event
             while pending_conversation_messages:
                 yield pending_conversation_messages.pop(0)
 

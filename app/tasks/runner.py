@@ -90,6 +90,7 @@ class DynamicTaskRunner:
     ) -> TaskRunResponse:
         flow_id = task_session["flow_id"]
         task_session_id = task_session["id"]
+        session_id = task_session.get("session_id", "")
 
         current_node_key = task_session["current_node_key"]
         variables = task_session.get("variables") or {}
@@ -206,6 +207,8 @@ class DynamicTaskRunner:
                         "variables": variables,
                         "status": "waiting_user_input",
                     },
+                organization_id=organization_id,
+                    session_id=session_id,
                 )
 
                 return TaskRunResponse(
@@ -228,6 +231,8 @@ class DynamicTaskRunner:
                         "variables": variables,
                         "status": "completed",
                     },
+                organization_id=organization_id,
+                    session_id=session_id,
                 )
 
                 return TaskRunResponse(
@@ -250,6 +255,8 @@ class DynamicTaskRunner:
                         "variables": variables,
                         "status": "handoff",
                     },
+                organization_id=organization_id,
+                    session_id=session_id,
                 )
 
                 return TaskRunResponse(
@@ -304,6 +311,8 @@ class DynamicTaskRunner:
                         "variables": variables,
                         "status": "completed",
                     },
+                organization_id=organization_id,
+                    session_id=session_id,
                 )
 
                 return TaskRunResponse(
@@ -354,7 +363,9 @@ class DynamicTaskRunner:
                     "variables": variables,
                     "status": "running",
                 },
-            )
+            organization_id=organization_id,
+                    session_id=session_id,
+                )
 
             # 사용자 입력은 현재 waiting node에서 한 번만 소비한다.
             was_waiting_for_input = False

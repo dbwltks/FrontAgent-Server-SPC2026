@@ -189,7 +189,7 @@ async def execute_instruction_node(
 
     try:
         response = await client.chat.completions.create(
-            model=getattr(settings, "openai_model", "gpt-4.1-mini"),
+            model=getattr(settings, "task_instruction_model", "gpt-4.1-mini"),
             messages=[
                 {
                     "role": "system",
