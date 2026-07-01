@@ -15,6 +15,16 @@ from app.repositories.service_repo import (
     get_service_item,
     list_service_item_options,
     calculate_service_price,
+    update_service_item,
+    deactivate_service_item,
+    deactivate_service_item_options_by_item,
+    get_service_item_option,
+    create_service_item,
+    create_service_item_option,
+    update_service_item_option,
+    deactivate_service_item_option,
+    list_pending_service_items,
+    list_pending_service_item_options,
 )
 
 
@@ -34,6 +44,57 @@ class CalculateServicePriceRequest(BaseModel):
         default_factory=list,
         example=["옵션 id 1", "옵션 id 2"],
     )
+
+class CreateServiceItemRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="a55c98f9-74ba-40d8-bc9d-bc3f1c0870da",
+    )
+    name: str = Field(..., example="이사 청소")
+    description: str | None = Field(
+        default=None,
+        example="이사 전후 집 전체를 청소하는 서비스입니다.",
+    )
+    base_price: int | None = Field(default=None, example=150000)
+    duration_minutes: int | None = Field(default=None, example=180)
+    is_available: bool = Field(default=True, example=True)
+
+class UpdateServiceItemRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    )
+    name: str | None = Field(default=None, example="화장실 청소")
+    description: str | None = Field(default=None, example="화장실 전체 청소 서비스")
+    base_price: int | None = Field(default=None, example=30000)
+    duration_minutes: int | None = Field(default=None, example=60)
+    is_available: bool | None = Field(default=None, example=True)
+
+
+class CreateServiceItemOptionRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    )
+    option_group: str = Field(default="옵션", example="청소 범위")
+    option_value: str = Field(..., example="곰팡이 제거 추가")
+    description: str | None = Field(default=None, example="곰팡이 제거 작업을 추가합니다.")
+    additional_price: int | None = Field(default=None, example=10000)
+    additional_duration: int | None = Field(default=None, example=20)
+    is_available: bool | None = Field(default=None, example=True)
+
+
+class UpdateServiceItemOptionRequest(BaseModel):
+    organization_id: str = Field(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    )
+    option_group: str | None = Field(default=None, example="청소 범위")
+    option_value: str | None = Field(default=None, example="곰팡이 제거 추가")
+    description: str | None = Field(default=None, example="곰팡이 제거 작업을 추가합니다.")
+    additional_price: int | None = Field(default=None, example=10000)
+    additional_duration: int | None = Field(default=None, example=20)
+    is_available: bool | None = Field(default=None, example=True)
 
 
 def _now_iso() -> str:
@@ -126,6 +187,19 @@ def _get_service_or_404(
         raise HTTPException(status_code=404, detail="Service not found")
 
     return rows[0]
+
+def _dump_exclude_unset(model: BaseModel) -> dict[str, Any]:
+    """
+    PATCH 요청에서 전달된 필드만 추출한다.
+
+    중요:
+    - 필드를 안 보내면 수정하지 않음
+    - 필드를 null로 보내면 실제로 DB에 null 저장 가능
+    """
+    if hasattr(model, "model_dump"):
+        return model.model_dump(exclude_unset=True)
+
+    return model.dict(exclude_unset=True)
 
 
 def _remove_none_values(data: dict[str, Any]) -> dict[str, Any]:
@@ -723,6 +797,67 @@ def list_services_api(
         "items": services,
     }
 
+@router.post("/{service_id}/items")
+def create_service_item_api(
+    service_id: str,
+    request: CreateServiceItemRequest,
+):
+    """
+    특정 서비스 대분류 아래에 실제 예약 가능한 상품을 추가한다.
+
+    예:
+    - 청소 서비스 아래에 이사 청소 추가
+    - 청소 서비스 아래에 화장실 청소 추가
+    - 미용 서비스 아래에 커트 추가
+    """
+    service = get_service(
+        organization_id=request.organization_id,
+        service_id=service_id,
+    )
+
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    name = str(request.name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="name is required",
+        )
+
+    if request.base_price is not None and request.base_price < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="base_price cannot be negative",
+        )
+
+    if request.duration_minutes is not None and request.duration_minutes < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="duration_minutes cannot be negative",
+        )
+
+    item = create_service_item(
+        organization_id=request.organization_id,
+        service_id=service_id,
+        item={
+            "name": name,
+            "description": request.description,
+            "base_price": request.base_price,
+            "duration_minutes": request.duration_minutes,
+            "is_available": request.is_available,
+        },
+    )
+
+    return {
+        "ok": True,
+        "message": "서비스 아이템을 추가했습니다.",
+        "service": {
+            "id": service.get("id"),
+            "name": service.get("name"),
+        },
+        "item": item,
+    }
 
 @router.get("/{service_id}/items")
 def list_service_items_by_service_api(
@@ -768,6 +903,46 @@ def list_service_items_api(
         "items": items,
     }
 
+@router.get("/items/pending")
+def list_pending_service_items_api(
+    organization_id: str = Query(
+        ...,
+        example="a55c98f9-74ba-40d8-bc9d-bc3f1c0870da",
+    ),
+    service_id: str | None = Query(
+        default=None,
+        description="특정 대분류 서비스 아래의 아이템만 조회할 때 사용",
+    ),
+    include_options: bool = Query(
+        default=True,
+        description="각 서비스 아이템 아래 옵션 목록도 함께 포함할지 여부",
+    ),
+    include_needs_review: bool = Query(
+        default=True,
+        description="pending뿐 아니라 sync_status=needs_review 항목도 포함할지 여부",
+    ),
+):
+    """
+    검토가 필요한 서비스 아이템 목록 조회.
+
+    사용 예:
+    - AI가 새 파일에서 추출한 신규 서비스 아이템 확인
+    - 가격/시간이 null인 서비스 확인
+    - 기존 승인값과 새 파일 값이 달라서 needs_review 된 항목 확인
+    """
+    items = list_pending_service_items(
+        organization_id=organization_id,
+        service_id=service_id,
+        include_options=include_options,
+        include_needs_review=include_needs_review,
+    )
+
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+    }
+
 
 @router.get("/items/{service_item_id}")
 def get_service_item_api(
@@ -783,6 +958,341 @@ def get_service_item_api(
         raise HTTPException(status_code=404, detail="Service item not found")
 
     return item
+
+
+@router.patch("/items/{service_item_id}")
+def update_service_item_api(
+    service_item_id: str,
+    request: UpdateServiceItemRequest,
+):
+    """
+    서비스 아이템 수정 API.
+
+    사용 예:
+    - AI가 추출한 가격이 null이면 관리자가 가격 입력
+    - 소요시간 수정
+    - 상품명/설명 수정
+    - 예약 선택지 노출 여부 수정
+    """
+    item = get_service_item(
+        organization_id=request.organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    update_payload = _dump_exclude_unset(request)
+    update_payload.pop("organization_id", None)
+
+    if "name" in update_payload:
+        name = update_payload.get("name")
+        if name is None or not str(name).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="name cannot be empty",
+            )
+        update_payload["name"] = str(name).strip()
+
+    if "base_price" in update_payload:
+        base_price = update_payload.get("base_price")
+        if base_price is not None and base_price < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="base_price cannot be negative",
+            )
+
+    if "duration_minutes" in update_payload:
+        duration_minutes = update_payload.get("duration_minutes")
+        if duration_minutes is not None and duration_minutes < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="duration_minutes cannot be negative",
+            )
+
+    updated = update_service_item(
+        organization_id=request.organization_id,
+        service_item_id=service_item_id,
+        updates=update_payload,
+    )
+
+    if not updated:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update service item",
+        )
+
+    return {
+        "ok": True,
+        "message": "서비스 아이템을 수정했습니다.",
+        "item": updated,
+    }
+
+
+@router.delete("/items/{service_item_id}")
+def delete_service_item_api(
+    service_item_id: str,
+    organization_id: str = Query(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    ),
+):
+    """
+    서비스 아이템 삭제 API.
+
+    실제 삭제가 아니라 is_available=false 처리한다.
+    이미 생성된 예약 내역과의 연결이 깨지지 않게 하기 위함.
+    """
+    item = get_service_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    deactivated_item = deactivate_service_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    deactivated_options = deactivate_service_item_options_by_item(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not deactivated_item:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to deactivate service item",
+        )
+
+    return {
+        "ok": True,
+        "message": "서비스 아이템을 비활성화했습니다. 예약 선택지에는 더 이상 노출되지 않습니다.",
+        "item": deactivated_item,
+        "deactivated_options_count": len(deactivated_options),
+        "deactivated_options": deactivated_options,
+    }
+
+@router.get("/options/pending")
+def list_pending_service_item_options_api(
+    organization_id: str = Query(
+        ...,
+        example="a55c98f9-74ba-40d8-bc9d-bc3f1c0870da",
+    ),
+    service_item_id: str | None = Query(
+        default=None,
+        description="특정 서비스 아이템의 옵션만 조회할 때 사용",
+    ),
+    include_needs_review: bool = Query(
+        default=True,
+        description="pending뿐 아니라 sync_status=needs_review 항목도 포함할지 여부",
+    ),
+):
+    """
+    검토가 필요한 서비스 옵션 목록 조회.
+
+    사용 예:
+    - 신규 옵션 검토
+    - 옵션 가격/시간이 null인 항목 확인
+    - 기존 승인 옵션과 새 파일 값이 달라서 needs_review 된 항목 확인
+    """
+    options = list_pending_service_item_options(
+        organization_id=organization_id,
+        service_item_id=service_item_id,
+        include_needs_review=include_needs_review,
+    )
+
+    return {
+        "ok": True,
+        "count": len(options),
+        "options": options,
+    }
+
+
+@router.post("/items/{service_item_id}/options")
+def create_service_item_option_api(
+    service_item_id: str,
+    request: CreateServiceItemOptionRequest,
+):
+    """
+    서비스 아이템 옵션 추가 API.
+
+    사용 예:
+    - 평수 옵션 추가
+    - 곰팡이 제거 추가
+    - 창틀 청소 추가
+    - 방문 거리 추가금 옵션 추가
+    """
+    item = get_service_item(
+        organization_id=request.organization_id,
+        service_item_id=service_item_id,
+    )
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Service item not found")
+
+    option_value = str(request.option_value or "").strip()
+    if not option_value:
+        raise HTTPException(
+            status_code=400,
+            detail="option_value is required",
+        )
+
+    if request.additional_price is not None and request.additional_price < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="additional_price cannot be negative",
+        )
+
+    if request.additional_duration is not None and request.additional_duration < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="additional_duration cannot be negative",
+        )
+
+    is_available = (
+        request.is_available
+        if request.is_available is not None
+        else bool(item.get("is_available"))
+    )
+
+    option = create_service_item_option(
+        organization_id=request.organization_id,
+        service_item_id=service_item_id,
+        option={
+            "option_group": request.option_group,
+            "option_value": option_value,
+            "description": request.description,
+            "additional_price": request.additional_price,
+            "additional_duration": request.additional_duration,
+            "is_available": is_available,
+        },
+    )
+
+    return {
+        "ok": True,
+        "message": "서비스 옵션을 추가했습니다.",
+        "option": option,
+    }
+
+
+@router.patch("/options/{option_id}")
+def update_service_item_option_api(
+    option_id: str,
+    request: UpdateServiceItemOptionRequest,
+):
+    """
+    서비스 옵션 수정 API.
+
+    사용 예:
+    - 옵션명 수정
+    - 추가금 수정
+    - 추가 소요시간 수정
+    - 옵션 노출 여부 수정
+    """
+    option = get_service_item_option(
+        organization_id=request.organization_id,
+        option_id=option_id,
+    )
+
+    if not option:
+        raise HTTPException(status_code=404, detail="Service item option not found")
+
+    update_payload = _dump_exclude_unset(request)
+    update_payload.pop("organization_id", None)
+
+    if "option_value" in update_payload:
+        option_value = update_payload.get("option_value")
+        if option_value is None or not str(option_value).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="option_value cannot be empty",
+            )
+        update_payload["option_value"] = str(option_value).strip()
+
+    if "option_group" in update_payload:
+        option_group = update_payload.get("option_group")
+        if option_group is None or not str(option_group).strip():
+            update_payload["option_group"] = "옵션"
+        else:
+            update_payload["option_group"] = str(option_group).strip()
+
+    if "additional_price" in update_payload:
+        additional_price = update_payload.get("additional_price")
+        if additional_price is not None and additional_price < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="additional_price cannot be negative",
+            )
+
+    if "additional_duration" in update_payload:
+        additional_duration = update_payload.get("additional_duration")
+        if additional_duration is not None and additional_duration < 0:
+            raise HTTPException(
+                status_code=400,
+                detail="additional_duration cannot be negative",
+            )
+
+    updated = update_service_item_option(
+        organization_id=request.organization_id,
+        option_id=option_id,
+        updates=update_payload,
+    )
+
+    if not updated:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update service item option",
+        )
+
+    return {
+        "ok": True,
+        "message": "서비스 옵션을 수정했습니다.",
+        "option": updated,
+    }
+
+
+@router.delete("/options/{option_id}")
+def delete_service_item_option_api(
+    option_id: str,
+    organization_id: str = Query(
+        ...,
+        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
+    ),
+):
+    """
+    서비스 옵션 삭제 API.
+
+    실제 삭제가 아니라 is_available=false 처리한다.
+    """
+    option = get_service_item_option(
+        organization_id=organization_id,
+        option_id=option_id,
+    )
+
+    if not option:
+        raise HTTPException(status_code=404, detail="Service item option not found")
+
+    deactivated = deactivate_service_item_option(
+        organization_id=organization_id,
+        option_id=option_id,
+    )
+
+    if not deactivated:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to deactivate service item option",
+        )
+
+    return {
+        "ok": True,
+        "message": "서비스 옵션을 비활성화했습니다. 예약 선택지에는 더 이상 노출되지 않습니다.",
+        "option": deactivated,
+    }
+
+
 
 
 @router.get("/items/{service_item_id}/options")

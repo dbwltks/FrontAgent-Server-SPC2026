@@ -1,6 +1,7 @@
 import hashlib
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from app.core.db import supabase
 
@@ -302,7 +303,38 @@ def list_service_items(
 
     result = query.execute()
     return result.data or []
+def create_service_item(
+    *,
+    organization_id: str,
+    service_id: str,
+    item: dict,
+) -> dict:
+    """
+    실제 예약 가능한 서비스 아이템 추가.
+    예: 이사 청소, 화장실 청소, 베란다 청소
+    """
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("service item name is required")
 
+    payload = {
+        "organization_id": organization_id,
+        "service_id": service_id,
+        "name": name,
+        "description": item.get("description"),
+        "base_price": item.get("base_price"),
+        "duration_minutes": item.get("duration_minutes"),
+        "is_available": item.get("is_available", True),
+        "raw_payload": item,
+    }
+
+    result = supabase.table("service_items").insert(payload).execute()
+    rows = result.data or []
+
+    if not rows:
+        raise RuntimeError("Failed to create service item")
+
+    return rows[0]
 
 def get_service_item(
     organization_id: str,
@@ -505,6 +537,175 @@ def _match_by_name_or_text(
 
     return reverse_contains_matches
 
+def update_service_item(
+    *,
+    organization_id: str,
+    service_item_id: str,
+    updates: dict[str, Any],
+) -> dict | None:
+    """
+    서비스 아이템 수정.
+    예: 이름, 설명, 기본 가격, 소요 시간, 노출 여부 수정.
+    """
+    if not updates:
+        return get_service_item(
+            organization_id=organization_id,
+            service_item_id=service_item_id,
+        )
+
+    result = (
+        supabase.table("service_items")
+        .update(updates)
+        .eq("organization_id", organization_id)
+        .eq("id", service_item_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def deactivate_service_item(
+    *,
+    organization_id: str,
+    service_item_id: str,
+) -> dict | None:
+    """
+    서비스 아이템 soft delete.
+    실제 삭제하지 않고 is_available=false 처리한다.
+    이미 예약된 과거 데이터 참조가 깨지는 걸 막기 위함.
+    """
+    result = (
+        supabase.table("service_items")
+        .update({"is_available": False})
+        .eq("organization_id", organization_id)
+        .eq("id", service_item_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def deactivate_service_item_options_by_item(
+    *,
+    organization_id: str,
+    service_item_id: str,
+) -> list[dict]:
+    """
+    서비스 아이템을 비활성화할 때 하위 옵션도 함께 비활성화한다.
+    """
+    result = (
+        supabase.table("service_item_options")
+        .update({"is_available": False})
+        .eq("organization_id", organization_id)
+        .eq("service_item_id", service_item_id)
+        .execute()
+    )
+
+    return result.data or []
+
+
+def get_service_item_option(
+    *,
+    organization_id: str,
+    option_id: str,
+) -> dict | None:
+    """
+    서비스 옵션 1개 조회.
+    """
+    result = (
+        supabase.table("service_item_options")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .eq("id", option_id)
+        .limit(1)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def create_service_item_option(
+    *,
+    organization_id: str,
+    service_item_id: str,
+    option: dict[str, Any],
+) -> dict:
+    """
+    서비스 아이템에 옵션 추가.
+    예: 평수 옵션, 추가 청소 옵션, 방문 옵션 등.
+    """
+    payload = {
+        "organization_id": organization_id,
+        "service_item_id": service_item_id,
+        "option_group": option.get("option_group") or "옵션",
+        "option_value": option.get("option_value"),
+        "description": option.get("description"),
+        "additional_price": option.get("additional_price"),
+        "additional_duration": option.get("additional_duration"),
+        "is_available": option.get("is_available", True),
+        "raw_payload": option,
+    }
+
+    result = supabase.table("service_item_options").insert(payload).execute()
+    rows = result.data or []
+
+    if not rows:
+        raise RuntimeError("Failed to create service item option")
+
+    return rows[0]
+
+
+def update_service_item_option(
+    *,
+    organization_id: str,
+    option_id: str,
+    updates: dict[str, Any],
+) -> dict | None:
+    """
+    서비스 옵션 수정.
+    예: 옵션명, 추가금, 추가 소요시간, 노출 여부 수정.
+    """
+    if not updates:
+        return get_service_item_option(
+            organization_id=organization_id,
+            option_id=option_id,
+        )
+
+    result = (
+        supabase.table("service_item_options")
+        .update(updates)
+        .eq("organization_id", organization_id)
+        .eq("id", option_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def deactivate_service_item_option(
+    *,
+    organization_id: str,
+    option_id: str,
+) -> dict | None:
+    """
+    서비스 옵션 soft delete.
+    실제 삭제하지 않고 is_available=false 처리한다.
+    """
+    result = (
+        supabase.table("service_item_options")
+        .update({"is_available": False})
+        .eq("organization_id", organization_id)
+        .eq("id", option_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    return rows[0] if rows else None
+
 
 def resolve_service_item_by_name(
     *,
@@ -670,4 +871,177 @@ def resolve_service_options_by_name(
         "unmatched_text": [],
         "message": None,
     }
+
+def _dedupe_rows_by_id(rows: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    deduped: list[dict] = []
+
+    for row in rows:
+        row_id = row.get("id")
+        if not row_id:
+            continue
+
+        if row_id in seen:
+            continue
+
+        seen.add(row_id)
+        deduped.append(row)
+
+    return deduped
+
+
+def list_pending_service_items(
+    *,
+    organization_id: str,
+    service_id: str | None = None,
+    include_options: bool = True,
+    include_needs_review: bool = True,
+) -> list[dict]:
+    """
+    검토가 필요한 서비스 아이템 목록 조회.
+
+    포함 대상:
+    - approval_status = pending
+    - include_needs_review=True이면 sync_status = needs_review 도 포함
+    """
+    def _base_query():
+        query = (
+            supabase.table("service_items")
+            .select("*")
+            .eq("organization_id", organization_id)
+        )
+
+        if service_id:
+            query = query.eq("service_id", service_id)
+
+        return query
+
+    pending_result = (
+        _base_query()
+        .eq("approval_status", "pending")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    rows = pending_result.data or []
+
+    if include_needs_review:
+        review_result = (
+            _base_query()
+            .eq("sync_status", "needs_review")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        rows.extend(review_result.data or [])
+
+    items = _dedupe_rows_by_id(rows)
+
+    if not include_options or not items:
+        return items
+
+    item_ids = [item["id"] for item in items if item.get("id")]
+
+    if not item_ids:
+        return items
+
+    option_result = (
+        supabase.table("service_item_options")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .in_("service_item_id", item_ids)
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    options = option_result.data or []
+
+    options_by_item_id: dict[str, list[dict]] = {}
+
+    for option in options:
+        service_item_id = option.get("service_item_id")
+        if not service_item_id:
+            continue
+
+        options_by_item_id.setdefault(service_item_id, []).append(option)
+
+    for item in items:
+        item["options"] = options_by_item_id.get(item.get("id"), [])
+
+    return items
+
+
+def list_pending_service_item_options(
+    *,
+    organization_id: str,
+    service_item_id: str | None = None,
+    include_needs_review: bool = True,
+) -> list[dict]:
+    """
+    검토가 필요한 서비스 옵션 목록 조회.
+
+    포함 대상:
+    - approval_status = pending
+    - include_needs_review=True이면 sync_status = needs_review 도 포함
+    """
+    def _base_query():
+        query = (
+            supabase.table("service_item_options")
+            .select("*")
+            .eq("organization_id", organization_id)
+        )
+
+        if service_item_id:
+            query = query.eq("service_item_id", service_item_id)
+
+        return query
+
+    pending_result = (
+        _base_query()
+        .eq("approval_status", "pending")
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    rows = pending_result.data or []
+
+    if include_needs_review:
+        review_result = (
+            _base_query()
+            .eq("sync_status", "needs_review")
+            .order("created_at", desc=True)
+            .execute()
+        )
+        rows.extend(review_result.data or [])
+
+    options = _dedupe_rows_by_id(rows)
+
+    if not options:
+        return options
+
+    item_ids = list(
+        {
+            option.get("service_item_id")
+            for option in options
+            if option.get("service_item_id")
+        }
+    )
+
+    if not item_ids:
+        return options
+
+    item_result = (
+        supabase.table("service_items")
+        .select("id, service_id, name, approval_status, is_available, sync_status")
+        .eq("organization_id", organization_id)
+        .in_("id", item_ids)
+        .execute()
+    )
+
+    items = item_result.data or []
+    item_by_id = {item["id"]: item for item in items if item.get("id")}
+
+    for option in options:
+        option["service_item"] = item_by_id.get(option.get("service_item_id"))
+
+    return options
 
