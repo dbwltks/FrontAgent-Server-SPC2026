@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.graph.message_utils import history_from_state_messages
 from app.graph.prompt_builder import build_response_instructions
+from app.graph.session_end_detection import is_obvious_end_session_request
 from app.graph.state import AgentState
 from app.providers.langchain_provider import (
     get_streaming_chat_model,
@@ -124,7 +125,9 @@ def _build_service_selection_message(task_result: dict) -> str | None:
 
     variables = task_result.get("variables") or {}
     available_services = variables.get("available_services") or {}
-    services = available_services.get("services") or []
+    resolved_selection = variables.get("service_item_resolve_result") or {}
+    source = resolved_selection if resolved_selection.get("services") else available_services
+    services = source.get("services") or []
     if not services:
         return None
 
@@ -136,7 +139,70 @@ def _build_service_selection_message(task_result: dict) -> str | None:
     if not service_names:
         return None
 
+    if source.get("selection_type") == "service_item":
+        return f"어떤 항목을 원하시나요? {', '.join(service_names)} 중에서 선택해 주세요."
+
     return f"어떤 서비스를 원하시나요? {', '.join(service_names)} 중에서 선택해 주세요."
+
+
+def _append_task_completion_follow_up(message: str, channel: str) -> str:
+    if not message:
+        message = "요청하신 작업이 완료되었습니다."
+    if any(keyword in message for keyword in ("더 궁금", "추가로 궁금", "통화를 종료", "마무리")):
+        return message
+
+    if channel in {"web_call", "phone", "voice"}:
+        follow_up = " 추가로 궁금한 점 있으실까요? 없으시면 통화를 종료해도 괜찮습니다."
+    else:
+        follow_up = " 추가로 궁금한 점 있으실까요? 없으시면 여기서 마무리하셔도 됩니다."
+    return f"{message.rstrip()} {follow_up.strip()}"
+
+
+def _is_no_more_after_task_message(message: str) -> bool:
+    normalized = re.sub(r"\s+", "", (message or "").strip().lower())
+    if not normalized:
+        return False
+
+    exact_matches = {
+        "아니요",
+        "아뇨",
+        "아니",
+        "없어요",
+        "없습니다",
+        "없어",
+        "괜찮아요",
+        "괜찮습니다",
+        "괜찮아",
+        "됐어요",
+        "됐습니다",
+        "됐어",
+        "네없어요",
+        "네괜찮아요",
+        "응없어",
+        "응괜찮아",
+    }
+    if normalized in exact_matches:
+        return True
+
+    return any(
+        pattern in normalized
+        for pattern in (
+            "더없",
+            "궁금한거없",
+            "궁금한것없",
+            "질문없",
+            "추가질문없",
+            "마무리",
+            "종료",
+            "끝낼게",
+        )
+    )
+
+
+def _task_follow_up_farewell(channel: str) -> str:
+    if channel in {"web_call", "phone", "voice"}:
+        return "네, 감사합니다. 통화 종료하겠습니다."
+    return "네, 감사합니다. 좋은 하루 되세요."
 
 
 async def _run_task(organization_id: str, session_id: str, user_message: str, task_type: str) -> dict:
@@ -168,6 +234,69 @@ async def _run_task(organization_id: str, session_id: str, user_message: str, ta
     if isinstance(task_response, dict):
         return task_response
     return {"status": "unknown"}
+
+
+def _build_task_agent_update(
+    *,
+    task_result: dict,
+    task_type: str,
+    rules: list[dict],
+    channel: str,
+    writer,
+) -> dict:
+    # task 결과를 받아 답변을 다시 작성하는 2차 LLM 호출을 생략한다.
+    # 서비스 선택 단계는 정확한 목록이 있으므로 코드로 직접 문장을 조립한다.
+    direct_message = _build_service_selection_message(task_result) or (task_result.get("message") or "").strip()
+    if not direct_message:
+        direct_message = "요청하신 내용을 처리하지 못했습니다. 다시 한 번 말씀해 주시겠어요?"
+
+    task_status = task_result.get("status")
+    if task_status == "completed":
+        direct_message = _append_task_completion_follow_up(direct_message, channel)
+
+    writer({"type": "ai_response_delta", "delta": direct_message})
+
+    still_active = task_status == "waiting_user_input"
+    awaiting_follow_up = task_status == "completed"
+
+    return {
+        "intent": "reservation",
+        "next_action": "run_task",
+        "task_type": task_type,
+        "use_knowledge": False,
+        "should_use_knowledge": False,
+        "should_end_session": False,
+        "active_task": "reservation" if still_active else None,
+        "task_step": task_result.get("current_node_key") if still_active else None,
+        "task_result": task_result,
+        "task_status": task_status,
+        "awaiting_task_completion_follow_up": awaiting_follow_up,
+        "final_response": direct_message,
+        "rules": rules,
+        "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
+        "messages": [{"role": "assistant", "content": direct_message}],
+    }
+
+
+async def _find_active_task_type(
+    repository: TaskRepository,
+    organization_id: str,
+    session_id: str,
+) -> str | None:
+    active_session = await asyncio.to_thread(
+        repository.find_active_session,
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+    if not active_session:
+        return None
+
+    flow_id = active_session.get("flow_id")
+    if not flow_id:
+        return "reservation_create"
+
+    flow = await asyncio.to_thread(repository.get_flow, flow_id)
+    return (flow or {}).get("trigger_intent") or "reservation_create"
 
 
 def build_agent_instructions(response_instructions: str) -> str:
@@ -246,13 +375,48 @@ async def agent_node(state: AgentState) -> dict:
     )
     instructions = build_agent_instructions(response_instructions)
 
+    writer = get_stream_writer()
+    channel = state.get("channel", "web_chat")
+    if state.get("awaiting_task_completion_follow_up") and _is_no_more_after_task_message(user_message):
+        farewell_message = _task_follow_up_farewell(channel)
+        writer({"type": "ai_response_delta", "delta": farewell_message})
+        return {
+            "intent": "end_session",
+            "next_action": "end_session",
+            "task_type": "none",
+            "use_knowledge": False,
+            "should_use_knowledge": False,
+            "should_end_session": True,
+            "awaiting_task_completion_follow_up": False,
+            "final_response": farewell_message,
+            "rules": rules,
+            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
+            "messages": [{"role": "assistant", "content": farewell_message}],
+        }
+
+    repository = TaskRepository()
+    active_task_type = await _find_active_task_type(repository, organization_id, session_id)
+    if active_task_type and not is_obvious_end_session_request(user_message):
+        task_result = await _run_task(
+            organization_id,
+            session_id,
+            user_message,
+            active_task_type,
+        )
+        return _build_task_agent_update(
+            task_result=task_result,
+            task_type=active_task_type,
+            rules=rules,
+            channel=channel,
+            writer=writer,
+        )
+
     model = await get_streaming_chat_model(organization_id)
     model_with_tools = model.bind_tools(AGENT_TOOLS)
 
     messages = history_to_messages(conversation_history) + [{"role": "user", "content": user_message}]
     system_and_messages = [{"role": "system", "content": instructions}] + messages
 
-    writer = get_stream_writer()
     tool_call_chunks: dict[int, dict] = {}
     text_chunks: list[str] = []
     has_tool_call = False
@@ -287,6 +451,7 @@ async def agent_node(state: AgentState) -> dict:
             "rules": rules,
             "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
             "should_end_session": False,
+            "awaiting_task_completion_follow_up": False,
             "messages": [{"role": "assistant", "content": final_response}],
         }
 
@@ -307,6 +472,7 @@ async def agent_node(state: AgentState) -> dict:
             "use_knowledge": False,
             "should_use_knowledge": False,
             "should_end_session": False,
+            "awaiting_task_completion_follow_up": False,
             "final_response": "죄송합니다, 요청을 처리하지 못했습니다.",
             "rules": rules,
             "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
@@ -322,6 +488,7 @@ async def agent_node(state: AgentState) -> dict:
             "use_knowledge": False,
             "should_use_knowledge": False,
             "should_end_session": True,
+            "awaiting_task_completion_follow_up": False,
             "final_response": farewell_message,
             "rules": rules,
             "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
@@ -385,6 +552,7 @@ async def agent_node(state: AgentState) -> dict:
             "use_knowledge": True,
             "should_use_knowledge": True,
             "should_end_session": False,
+            "awaiting_task_completion_follow_up": False,
             "knowledge_context": knowledge_context,
             "used_knowledge": used_knowledge,
             "final_response": direct_message,
@@ -393,46 +561,16 @@ async def agent_node(state: AgentState) -> dict:
             "messages": [{"role": "assistant", "content": direct_message}],
         }
     elif tool_name == "run_task":
-        intent, next_action = "reservation", "run_task"
-        task_result = await _run_task(organization_id, session_id, user_message, tool_args.get("task_type", "reservation_create"))
-
-        # task 결과를 받아 답변을 다시 작성하는 2차 LLM 호출을 생략한다.
-        # 서비스 선택 단계는 정확한 목록이 있으므로 코드로 직접 문장을
-        # 조립한다(LLM이 빈 목록을 그럴듯하게 지어내는 사례가 실측됐다 -
-        # 빌트인 규칙 "모르면 지어내지 않기"를 어김). 그 외 단계는
-        # DynamicTaskRunner가 이미 만들어주는 task_result["message"](각
-        # task 노드의 질문/안내 문구)를 그대로 최종 답변으로 쓴다.
-        direct_message = _build_service_selection_message(task_result) or (task_result.get("message") or "").strip()
-        if not direct_message:
-            direct_message = "요청하신 내용을 처리하지 못했습니다. 다시 한 번 말씀해 주시겠어요?"
-
-        writer({"type": "ai_response_delta", "delta": direct_message})
-
-        # task_status가 waiting_user_input이면 다음 사용자 메시지도 이
-        # 예약을 이어가야 한다 - checkpointer가 영속화하는 active_task/
-        # task_step을 계속 켜둔다. 그래야 다음 턴에 LLM이 (혹시 run_task를
-        # 다시 호출하지 않더라도) 시스템 프롬프트의 [현재 요청 상태]를 통해
-        # "진행 중인 Task가 있다"는 것을 인지한다. completed/failed면 이
-        # 턴에서 태스크가 끝난 것이므로 초기화한다.
-        task_status = task_result.get("status")
-        still_active = task_status == "waiting_user_input"
-
-        return {
-            "intent": intent,
-            "next_action": next_action,
-            "task_type": tool_args.get("task_type", "none"),
-            "use_knowledge": False,
-            "should_use_knowledge": False,
-            "should_end_session": False,
-            "active_task": "reservation" if still_active else None,
-            "task_step": task_result.get("current_node_key") if still_active else None,
-            "task_result": task_result,
-            "task_status": task_status,
-            "final_response": direct_message,
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-            "messages": [{"role": "assistant", "content": direct_message}],
-        }
+        task_type = tool_args.get("task_type", "reservation_create")
+        writer({"type": "task_start"})
+        task_result = await _run_task(organization_id, session_id, user_message, task_type)
+        return _build_task_agent_update(
+            task_result=task_result,
+            task_type=task_type,
+            rules=rules,
+            channel=channel,
+            writer=writer,
+        )
     # tool_name == "request_handoff"
     return {
         "intent": "handoff",
@@ -441,6 +579,7 @@ async def agent_node(state: AgentState) -> dict:
         "use_knowledge": False,
         "should_use_knowledge": False,
         "should_end_session": False,
+        "awaiting_task_completion_follow_up": False,
         "final_response": None,
         "rules": rules,
         "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],

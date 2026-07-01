@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import threading
 
 import httpx
@@ -10,9 +11,12 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response, WebSocke
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
+from app.graph.nodes.conversation_node import invalidate_conversation_cache
 from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.conversation_repo import (
     create_conversation_message,
+    end_call_conversation,
+    get_conversation_by_session,
     get_or_create_conversation,
     update_conversation_last_message,
 )
@@ -26,6 +30,7 @@ from app.services.voice_tts import (
     resolve_tts_config,
     stream_speech_content,
 )
+from app.tasks.repository import TaskRepository
 
 router = APIRouter(prefix="/web-call", tags=["WebCall"])
 logger = logging.getLogger(__name__)
@@ -48,6 +53,14 @@ def _resolve_voice_mode(ai_settings: dict) -> str:
 
 async def _send(websocket: WebSocket, event_type: str, **payload) -> None:
     await websocket.send_json({"type": event_type, **payload})
+
+
+def _is_session_closed(organization_id: str, session_id: str) -> bool:
+    conversation = get_conversation_by_session(
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+    return bool(conversation and conversation.get("status") == "closed")
 
 
 class _SentenceTtsStreamer:
@@ -177,6 +190,17 @@ async def web_call_ws(websocket: WebSocket, organization_id: str, session_id: st
     audio_chunk(STT)/interrupt는 5~6단계에서 추가한다.
     """
     await websocket.accept()
+    if await asyncio.to_thread(_is_session_closed, organization_id, session_id):
+        await _send(
+            websocket,
+            "session_closed",
+            code="SESSION_CLOSED",
+            message="This session is closed. Start a new session_id.",
+            new_session_required=True,
+        )
+        await websocket.close(code=1008)
+        return
+
     ai_settings = await asyncio.to_thread(get_ai_settings, organization_id)
 
     if _resolve_voice_mode(ai_settings) != "pipeline":
@@ -216,6 +240,17 @@ async def web_call_ws(websocket: WebSocket, organization_id: str, session_id: st
                 )
 
             elif msg_type == "call_end":
+                await asyncio.to_thread(
+                    end_call_conversation,
+                    organization_id=organization_id,
+                    session_id=session_id,
+                )
+                await asyncio.to_thread(
+                    TaskRepository().cancel_active_sessions,
+                    organization_id,
+                    session_id,
+                )
+                invalidate_conversation_cache(organization_id, session_id)
                 break
 
     except WebSocketDisconnect:
@@ -252,33 +287,28 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
         "type": "realtime",
         "model": realtime_model,
         "instructions": (
-            "너는 웹 음성 상담을 중계하는 음성 세션이다. "
-            "사용자가 음성으로 말하든, 채팅으로 글을 입력하든 똑같이 처리한다. "
-            "절대 자체 지식으로 답하지 않는다. 항상 아래 두 도구 중 하나를 호출해서 "
-            "받은 결과만 그대로, 실제 상담원처럼 자연스럽게 말한다. "
-            "도구 결과 내용을 추가하거나 바꾸지 않는다. 도구 결과에 없는 세부 정보"
-            "(옵션, 가격, 추가 항목 등)를 먼저 나서서 설명하지 않는다 - 사용자가 "
-            "묻지 않은 정보는 한 번에 다 말하지 말고, 통화이므로 한 번에 한 가지만 "
-            "짧게 묻거나 답한다. "
-            "사용자에게 AI, 함수, 도구, 시스템 같은 내부 구현 단어를 말하지 않는다.\n\n"
-            "## search_knowledge — PROACTIVE\n"
-            "Use when: 가격, 서비스 설명, 정책, 운영시간 등 정보를 묻는 질문.\n"
-            "확인 안내를 먼저 말하지 말고 즉시 호출한다. 도구 결과가 오기 전에는 "
-            "추측하거나 임시 답변을 만들지 않는다.\n\n"
-            "## task_action — CONFIRMATION FIRST\n"
-            "Use when: 예약 생성·조회·취소·변경처럼 실제 상태를 바꾸는 요청.\n"
-            "Confirmation phrase: 예약을 새로 시작하거나 취소/변경하기 전에는 "
-            "'예약을 취소(또는 변경/등록)해드릴까요?'처럼 한 번 되물어 사용자가 "
-            "동의한 다음에만 호출한다. 단, 이미 진행 중인 예약 대화를 이어가는 "
-            "응답(예: 날짜·이름 등 정보 제공)에는 매번 재확인하지 않고 바로 호출한다."
+            "당신은 한국어 음성 상담 전문가입니다. "
+            "전화 통화하듯 짧고 자연스러운 한국어로 대화합니다. "
+            "\n\n"
+            "[도구 사용 규칙]\n"
+            "- 인사, 잡담, 감사, 통화 마무리는 도구 없이 직접 짧게 답합니다.\n"
+            "- 서비스 가격·정책·운영시간 등 정보 질문 → search_knowledge 호출\n"
+            "- 예약 생성·조회·취소·변경 요청 → task_action 호출\n"
+            "- 도구의 message에는 사용자가 말한 내용을 그대로 넣습니다.\n"
+            "- 잡음·무음·알아들을 수 없는 소리에는 반응하지 않습니다.\n"
+            "\n"
+            "[답변 규칙]\n"
+            "- 도구 결과의 핵심 내용을 통화 말투로 자연스럽게 전달합니다.\n"
+            "- 결과를 그대로 읽지 말고 상담원처럼 풀어서 말합니다.\n"
+            "- answer가 빈 문자열이면 아무 말도 하지 않습니다.\n"
+            "- 한 번에 한 가지만 간결하게 말합니다.\n"
+            "- AI, 시스템, 도구, 함수 같은 내부 용어는 절대 말하지 않습니다."
         ),
         "audio": {
             "input": {
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.6,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
+                    "type": "semantic_vad",
+                    "eagerness": "medium",
                     "create_response": True,
                     "interrupt_response": True,
                 },
@@ -289,16 +319,13 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
             {
                 "type": "function",
                 "name": "search_knowledge",
-                "description": (
-                    "회사 지식 베이스(가격, 서비스 설명, 정책 등)를 검색해 답변을 받는다. "
-                    "정보 조회뿐이라 부작용이 없으므로 확인 없이 바로 호출한다."
-                ),
+                "description": "가격, 서비스 설명, 운영 정책 등 지식 베이스를 검색한다. 사용자가 정보를 묻는 질문형 발화일 때 호출한다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "사용자가 방금 물어본 내용을 빠짐없이 정리한 한국어 문장",
+                            "description": "사용자가 실제로 방금 말한 내용을 추측 없이 그대로 옮긴 한국어 문장",
                         },
                     },
                     "required": ["message"],
@@ -308,17 +335,13 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
             {
                 "type": "function",
                 "name": "task_action",
-                "description": (
-                    "예약 생성·조회·취소·변경을 시작하거나 이어간다. 실제 상태를 "
-                    "바꾸는 작업이므로 새로 시작/취소/변경할 때는 사용자 확인을 받은 "
-                    "뒤에 호출한다."
-                ),
+                "description": "예약 생성/조회/취소/변경 등 실제 작업을 처리한다. 사용자가 예약하겠다는 의도가 명확할 때 호출한다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "사용자가 방금 말하거나 입력한 내용을 빠짐없이 정리한 한국어 문장",
+                            "description": "사용자가 실제로 방금 말한 내용을 추측 없이 그대로 옮긴 한국어 문장",
                         },
                     },
                     "required": ["message"],
@@ -326,11 +349,6 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
                 },
             },
         ],
-        # required는 매 turn마다 tool 호출을 강제해, 에코/잡음으로 생긴 허위
-        # turn에도 모델이 message를 지어내 tool을 호출하게 만든다(사용자가
-        # 말하지 않은 내용으로 AI가 혼자 대화를 이어가는 증상의 원인). instructions
-        # 에 이미 "tool 호출 없이는 절대 답하지 마라"고 명시했으므로 auto로도
-        # 실제 질문에는 정상적으로 호출된다.
         "tool_choice": "auto",
     }
 
@@ -402,9 +420,9 @@ class RealtimeQueryRequest(BaseModel):
     message: str = Field(..., example="안녕하세요")
 
 
-# OpenAI Realtime 세션의 search_knowledge/task_action tool이 호출됐을 때
-# 그 결과를 만들어주는 webhook들. 음성 발화든 data channel로 들어온 텍스트든
-# OpenAI가 똑같이 이 tool들을 호출하므로 입력 경로와 무관하게 공통이다.
+# OpenAI Realtime 세션의 query_agent tool이 호출됐을 때 그 결과를 만들어주는
+# webhook. 음성 발화든 data channel로 들어온 텍스트든 OpenAI가 똑같이 이
+# tool을 호출하므로 입력 경로와 무관하게 공통이다.
 #
 # 클라이언트(프론트)는 텍스트를 이 엔드포인트로 직접 보내면 안 되고, 반드시
 # Realtime data channel(conversation.item.create)을 거쳐 OpenAI가 tool을
@@ -477,6 +495,29 @@ def _realtime_speech_answer(answer: str) -> str:
     return normalize_text_for_korean_speech(answer)
 
 
+def _is_meaningful_realtime_message(message: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(message or "").strip())
+    if len(normalized) < 2:
+        return False
+
+    meaningless = {
+        "음",
+        "어",
+        "아",
+        "네",
+        "예",
+        "응",
+        "흠",
+        "하",
+        "ㅎㅎ",
+        "안",
+    }
+    if normalized in meaningless:
+        return False
+
+    return bool(re.search(r"[가-힣A-Za-z0-9]", normalized))
+
+
 def _increment_reference_counts_background(source_ids: list[str]) -> None:
     if not source_ids:
         return
@@ -488,6 +529,31 @@ def _increment_reference_counts_background(source_ids: list[str]) -> None:
             logger.warning("Failed to increment realtime knowledge reference counts", exc_info=True)
 
     threading.Thread(target=_increment, daemon=True).start()
+
+
+@router.post("/realtime/query-agent")
+async def realtime_query_agent(req: RealtimeQueryRequest):
+    """
+    Realtime에서 들어온 사용자 발화를 기존 채팅/pipeline과 동일한 LangGraph
+    agent 경로로 전달한다. Realtime 모델은 검색/예약 여부를 직접 고르지 않고,
+    실제 판단은 run_agent_turn 내부의 agent_node/tool calling이 담당한다.
+    """
+    if not _is_meaningful_realtime_message(req.message):
+        return {"answer": ""}
+
+    result = await run_agent_turn(
+        organization_id=req.organization_id,
+        session_id=req.session_id,
+        user_message=req.message,
+        channel=CHANNEL,
+    )
+
+    answer = result.get("final_response") or AI_DISABLED_MESSAGE
+    return {
+        "answer": _realtime_speech_answer(answer),
+        "conversation_id": result.get("conversation_id"),
+        "should_end_session": bool(result.get("should_end_session")),
+    }
 
 
 @router.post("/realtime/search-knowledge")
@@ -509,6 +575,9 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
     # 가장 유사도 높은 chunk 1개만 쓰므로 match_count=1로 호출한다 - 기본값(5)
     # 그대로면 Supabase RPC가 불필요하게 20개(5 * OVERFETCH_MULTIPLIER)를
     # 가져와 4개를 버린다.
+    if not _is_meaningful_realtime_message(req.message):
+        return {"answer": ""}
+
     chunks = await retrieve_knowledge(organization_id=req.organization_id, query=req.message, match_count=1)
     _increment_reference_counts_background(
         [chunk["source_id"] for chunk in chunks if chunk.get("source_id")]
@@ -531,21 +600,64 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
 @router.post("/realtime/task-action")
 async def realtime_task_action(req: RealtimeQueryRequest):
     """
-    task_action tool 결과. task_type 분류(예약 생성/조회/취소/변경 구분)는
-    decision_node가 이미 갖고 있는 로직이라 별도로 다시 만들지 않고
-    run_agent_turn(LangGraph 전체)에 맡긴다. 진행 중인 예약 세션이 있으면
-    task_router_node가 decision_node를 건너뛰고 바로 이어간다.
+    task_action tool 결과. OpenAI가 이미 의도를 판단해서 호출한 거므로
+    LangGraph 메인 LLM(agent_node)을 건너뛰고 _run_task를 직접 호출한다.
+    진행 중인 태스크 세션은 Redis에서 즉시 이어간다.
     """
-    result = await run_agent_turn(
-        organization_id=req.organization_id,
-        session_id=req.session_id,
+    if not _is_meaningful_realtime_message(req.message):
+        return {"answer": ""}
+
+    from app.graph.nodes.agent_node import _run_task
+    from app.tasks.repository import TaskRepository
+
+    organization_id = req.organization_id
+    session_id = req.session_id
+
+    # 진행 중인 세션 있으면 이어가고, 없으면 reservation_create로 시작
+    repo = TaskRepository()
+    active_session = await asyncio.to_thread(
+        repo.find_active_session,
+        organization_id=organization_id,
+        session_id=session_id,
+    )
+    flow_id = None
+    if active_session is None:
+        flow = await asyncio.to_thread(
+            repo.find_enabled_flow_for_task_type,
+            organization_id=organization_id,
+            task_type="reservation_create",
+        )
+        if flow:
+            flow_id = flow["id"]
+
+    from app.tasks.runner import DynamicTaskRunner
+    runner = DynamicTaskRunner(repository=repo)
+    task_response = await runner.run(
+        organization_id=organization_id,
+        session_id=session_id,
         user_message=req.message,
-        channel=CHANNEL,
+        flow_id=flow_id,
     )
 
-    answer = result.get("final_response") or AI_DISABLED_MESSAGE
+    if hasattr(task_response, "model_dump"):
+        task_result = task_response.model_dump()
+    elif hasattr(task_response, "__dict__"):
+        from dataclasses import asdict, is_dataclass
+        task_result = asdict(task_response) if is_dataclass(task_response) else vars(task_response)
+    else:
+        task_result = dict(task_response) if task_response else {}
+
+    answer = (task_result.get("message") or "").strip()
+    should_end = task_result.get("status") == "completed" and not answer
+
+    _save_realtime_turn_background(
+        organization_id=organization_id,
+        session_id=session_id,
+        user_message=req.message,
+        answer=answer or "",
+    )
+
     return {
-        "answer": _realtime_speech_answer(answer),
-        "conversation_id": result.get("conversation_id"),
-        "should_end_session": bool(result.get("should_end_session")),
+        "answer": _realtime_speech_answer(answer) if answer else "",
+        "should_end_session": bool(task_result.get("should_end_session", False)),
     }

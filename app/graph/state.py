@@ -76,6 +76,10 @@ class AgentState(TypedDict):
     
     task_status: Optional[str]
 
+    # 태스크 완료 안내 뒤 "더 궁금한 점이 있는지" 확인 중인지 여부.
+    # 사용자가 "없어요/괜찮아요"처럼 답하면 세션 종료 신호로 전환한다.
+    awaiting_task_completion_follow_up: bool
+
     # 기존 should_use_knowledge_node와의 호환용
     # decision_node 구조가 안정화되면 나중에 제거 가능
     should_use_knowledge: bool

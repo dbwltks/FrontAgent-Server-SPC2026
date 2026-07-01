@@ -64,6 +64,17 @@ def build_call_end_payload(
 
 
 def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
+    if node_name == "rule":
+        rules = node_state.get("rules", [])
+        items = [
+            {
+                "name": rule.get("name"),
+                "instruction": rule.get("instruction"),
+            }
+            for rule in rules
+        ]
+        return f"활성 규칙 {len(rules)}개를 응답 지시문에 반영", items
+
     if node_name == "prepare":
         detail = (
             f"intent={node_state.get('intent')} / "
@@ -161,6 +172,11 @@ async def stream_agent_graph_events(
             elif chunk_type == "knowledge_start":
                 yield "knowledge_start", {
                     "queries": chunk.get("queries", []),
+                    "elapsed_ms": elapsed_ms_since(started_at),
+                }
+
+            elif chunk_type == "task_start":
+                yield "task_start", {
                     "elapsed_ms": elapsed_ms_since(started_at),
                 }
 
