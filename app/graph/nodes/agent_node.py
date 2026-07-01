@@ -278,6 +278,11 @@ async def agent_node(state: AgentState) -> dict:
     if not has_tool_call:
         final_response = "".join(text_chunks).strip()
         return {
+            "intent": "general",
+            "next_action": "respond_general",
+            "task_type": "none",
+            "use_knowledge": False,
+            "should_use_knowledge": False,
             "final_response": final_response,
             "rules": rules,
             "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],

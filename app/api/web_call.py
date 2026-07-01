@@ -16,10 +16,11 @@ from app.repositories.conversation_repo import (
     get_or_create_conversation,
     update_conversation_last_message,
 )
+from app.repositories.knowledge_repo import increment_reference_counts
 from app.repositories.organization_ai_settings_repo import get_ai_settings
 from app.services.agent_runtime import run_agent_turn, stream_agent_turn
 from app.services.agent_stream import AI_DISABLED_MESSAGE
-from app.services.voice_korean_text import split_tts_segments
+from app.services.voice_korean_text import normalize_text_for_korean_speech, split_tts_segments
 from app.services.voice_tts import (
     TTS_CONTENT_TYPE,
     resolve_tts_config,
@@ -262,8 +263,8 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
             "사용자에게 AI, 함수, 도구, 시스템 같은 내부 구현 단어를 말하지 않는다.\n\n"
             "## search_knowledge — PROACTIVE\n"
             "Use when: 가격, 서비스 설명, 정책, 운영시간 등 정보를 묻는 질문.\n"
-            "확인 없이 즉시 호출한다. 호출이 길어질 것 같으면 'Let me check that.' 같은 "
-            "짧은 한 문장만 먼저 말하고 곧바로 호출한다.\n\n"
+            "확인 안내를 먼저 말하지 말고 즉시 호출한다. 도구 결과가 오기 전에는 "
+            "추측하거나 임시 답변을 만들지 않는다.\n\n"
             "## task_action — CONFIRMATION FIRST\n"
             "Use when: 예약 생성·조회·취소·변경처럼 실제 상태를 바꾸는 요청.\n"
             "Confirmation phrase: 예약을 새로 시작하거나 취소/변경하기 전에는 "
@@ -275,6 +276,9 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
             "input": {
                 "turn_detection": {
                     "type": "server_vad",
+                    "threshold": 0.6,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 700,
                     "create_response": True,
                     "interrupt_response": True,
                 },
@@ -465,6 +469,27 @@ def _save_realtime_turn_background(
     threading.Thread(target=_save, daemon=True).start()
 
 
+def _realtime_speech_answer(answer: str) -> str:
+    """
+    OpenAI Realtime은 별도 TTS 전처리 경로를 타지 않으므로 pipeline TTS와 같은
+    한국어 읽기 보정을 tool output에 적용한다.
+    """
+    return normalize_text_for_korean_speech(answer)
+
+
+def _increment_reference_counts_background(source_ids: list[str]) -> None:
+    if not source_ids:
+        return
+
+    def _increment():
+        try:
+            increment_reference_counts(source_ids)
+        except Exception:
+            logger.warning("Failed to increment realtime knowledge reference counts", exc_info=True)
+
+    threading.Thread(target=_increment, daemon=True).start()
+
+
 @router.post("/realtime/search-knowledge")
 async def realtime_search_knowledge(req: RealtimeQueryRequest):
     """
@@ -485,6 +510,9 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
     # 그대로면 Supabase RPC가 불필요하게 20개(5 * OVERFETCH_MULTIPLIER)를
     # 가져와 4개를 버린다.
     chunks = await retrieve_knowledge(organization_id=req.organization_id, query=req.message, match_count=1)
+    _increment_reference_counts_background(
+        [chunk["source_id"] for chunk in chunks if chunk.get("source_id")]
+    )
 
     answer = summarize_knowledge_chunk(chunks[0]) if chunks else None
     if not answer:
@@ -497,7 +525,7 @@ async def realtime_search_knowledge(req: RealtimeQueryRequest):
         answer=answer,
     )
 
-    return {"answer": answer}
+    return {"answer": _realtime_speech_answer(answer)}
 
 
 @router.post("/realtime/task-action")
@@ -517,7 +545,7 @@ async def realtime_task_action(req: RealtimeQueryRequest):
 
     answer = result.get("final_response") or AI_DISABLED_MESSAGE
     return {
-        "answer": answer,
+        "answer": _realtime_speech_answer(answer),
         "conversation_id": result.get("conversation_id"),
         "should_end_session": bool(result.get("should_end_session")),
     }
