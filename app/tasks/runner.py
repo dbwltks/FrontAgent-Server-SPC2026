@@ -98,6 +98,8 @@ class DynamicTaskRunner:
         # waiting_user_input 상태일 때만 이번 사용자 메시지를 현재 노드 입력으로 사용한다.
         # instruction 노드는 매 턴 사용자 메시지를 보고 직접 판단하므로 항상 전달한다.
         was_waiting_for_input = task_session.get("status") == "waiting_user_input"
+        waiting_node_key = task_session.get("waiting_node_key") or current_node_key
+        user_input_consumed = False
 
         max_steps = 20
 
@@ -163,11 +165,18 @@ class DynamicTaskRunner:
                     current_node_key = next_node_key
                     continue
 
-            user_input_for_current_node = (
-                user_message
-                if was_waiting_for_input or node.get("node_type") == "instruction"
-                else None
-            )
+            if user_input_consumed:
+                user_input_for_current_node = None
+            elif was_waiting_for_input:
+                user_input_for_current_node = (
+                    user_message
+                    if current_node_key == waiting_node_key
+                    else None
+                )
+            else:
+                user_input_for_current_node = user_message if node.get("node_type") == "instruction" else None
+            if user_input_for_current_node is not None:
+                user_input_consumed = True
 
             memory = TaskMemory(variables)
 
@@ -413,7 +422,7 @@ class DynamicTaskRunner:
                 variables,
             )
             next_node_key = config.get("branch_node_key") if condition_matched else config.get("fallback_node_key")
-            if self._node_key_exists(flow_id, next_node_key):
+            if next_node_key != current_node_key and self._node_key_exists(flow_id, next_node_key):
                 return next_node_key
 
         edges = self.repository.list_edges_from(

@@ -55,12 +55,21 @@ def execute_function_node(
 
         # config.params에 organization_id를 명시하지 않은 함수 노드는
         # 현재 세션의 organization_id를 자동으로 채워준다.
-        if organization_id and "organization_id" not in resolved_params:
+        if organization_id and not resolved_params.get("organization_id"):
             resolved_params = {**resolved_params, "organization_id": organization_id}
 
         function_result = registered_function.handler(
             resolved_params,
             memory.to_dict(),
+        )
+        public_function_result = (
+            {
+                key: value
+                for key, value in function_result.items()
+                if not str(key).startswith("_")
+            }
+            if isinstance(function_result, dict)
+            else function_result
         )
 
         memory_updates: dict[str, Any] = {}
@@ -78,15 +87,18 @@ def execute_function_node(
                         },
                     )
 
-                memory_updates.update(function_result)
+                memory_updates.update(public_function_result)
             else:
                 result_key = save_as or f"{function_name}_result"
-                memory_updates[result_key] = function_result
+                memory_updates[result_key] = public_function_result
 
             if isinstance(function_result, dict) and isinstance(memory_mappings, dict):
                 for memory_key, result_key in memory_mappings.items():
                     if result_key in function_result:
                         memory_updates[memory_key] = function_result.get(result_key)
+
+            if isinstance(function_result, dict) and isinstance(function_result.get("_memory_updates"), dict):
+                memory_updates.update(function_result["_memory_updates"])
 
         return ExecutorResult(
             status="success",

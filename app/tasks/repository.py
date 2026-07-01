@@ -1,5 +1,4 @@
 import json
-import threading
 import time
 from typing import Any
 
@@ -43,6 +42,14 @@ def _rkey_session(organization_id: str, session_id: str) -> str:
 def invalidate_enabled_flow_cache(organization_id: str) -> None:
     for key in [key for key in _enabled_flow_cache if key[0] == organization_id]:
         _enabled_flow_cache.pop(key, None)
+
+
+def invalidate_flow_meta_cache(flow_id: str) -> None:
+    keys = [_rkey_start_node(flow_id)]
+    keys.extend(redis_client.scan_iter(f"task:node:{flow_id}:*"))
+    keys.extend(redis_client.scan_iter(f"task:edges:{flow_id}:*"))
+    if keys:
+        redis_client.delete(*keys)
 
 
 class TaskRepository:
@@ -252,8 +259,20 @@ class TaskRepository:
         variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         import uuid
-        session = {
-            "id": str(uuid.uuid4()),
+
+        existing = (
+            self.client.table("task_sessions")
+            .select("*")
+            .eq("organization_id", organization_id)
+            .eq("session_id", session_id)
+            .eq("flow_id", flow_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        existing_rows = existing.data or []
+
+        values = {
             "organization_id": organization_id,
             "session_id": session_id,
             "flow_id": flow_id,
@@ -261,17 +280,21 @@ class TaskRepository:
             "waiting_node_key": None,
             "variables": variables or {},
             "status": "running",
+            "last_error": None,
         }
-        # Redis에 즉시 쓰고 DB는 백그라운드로 영속화한다.
+
+        if existing_rows:
+            task_session_id = existing_rows[0]["id"]
+            self.client.table("task_sessions").update(values).eq("id", task_session_id).execute()
+            session = {**existing_rows[0], **values}
+        else:
+            session = {"id": str(uuid.uuid4()), **values}
+            # DB를 기준 저장소로 먼저 성공시킨 뒤 Redis를 갱신한다. Redis 쓰기가
+            # 먼저 성공하고 DB가 실패하면 다음 턴은 존재하지 않는 세션을 이어갈 수 있다.
+            self.client.table("task_sessions").insert(session).execute()
+
         rkey = _rkey_session(organization_id, session_id)
         redis_client.setex(rkey, _TASK_SESSION_TTL, json.dumps(session))
-
-        def _persist():
-            try:
-                self.client.table("task_sessions").insert(session).execute()
-            except Exception:
-                pass
-        threading.Thread(target=_persist, daemon=True).start()
 
         return session
 
@@ -283,7 +306,9 @@ class TaskRepository:
         organization_id: str | None = None,
         session_id: str | None = None,
     ) -> dict[str, Any] | None:
-        # Redis 세션을 즉시 업데이트하고 DB는 백그라운드 영속화.
+        # DB를 먼저 갱신하고, 성공한 뒤 Redis cache를 따라오게 한다.
+        self.client.table("task_sessions").update(values).eq("id", task_session_id).execute()
+
         if organization_id and session_id:
             rkey = _rkey_session(organization_id, session_id)
             raw = redis_client.get(rkey)
@@ -292,10 +317,20 @@ class TaskRepository:
                 session.update(values)
                 redis_client.setex(rkey, _TASK_SESSION_TTL, json.dumps(session))
 
-        def _persist():
-            try:
-                self.client.table("task_sessions").update(values).eq("id", task_session_id).execute()
-            except Exception:
-                pass
-        threading.Thread(target=_persist, daemon=True).start()
         return None
+
+    def cancel_active_sessions(
+        self,
+        organization_id: str,
+        session_id: str,
+    ) -> None:
+        values = {"status": "cancelled"}
+        (
+            self.client.table("task_sessions")
+            .update(values)
+            .eq("organization_id", organization_id)
+            .eq("session_id", session_id)
+            .in_("status", ACTIVE_TASK_STATUSES)
+            .execute()
+        )
+        redis_client.delete(_rkey_session(organization_id, session_id))

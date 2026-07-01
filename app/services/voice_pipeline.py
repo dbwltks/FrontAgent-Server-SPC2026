@@ -187,12 +187,7 @@ async def stream_pipeline_voice_turn_events(
             audio_index += 1
             tts_tasks.append(asyncio.create_task(synth_worker(index, segment_text)))
 
-        # STT 완료 직후 브릿지("잠시만요.") 합성을 index=0으로 시작한다.
-        # LLM과 병렬로 ~500ms 안에 완료되므로, LLM 루프 시작 직전에 await하면
-        # 대기 없이 즉시 클라이언트로 전송된다. 본답변은 index=1부터 이어진다.
-        bridge_task = asyncio.create_task(synth_worker(0, "잠시만요."))
-        audio_index += 1
-        tts_tasks.append(bridge_task)
+        bridge_task = asyncio.create_task(asyncio.sleep(0))  # no-op placeholder
 
         pending_audio_events: dict[int, str] = {}
         next_audio_index_to_emit = 0
@@ -211,6 +206,9 @@ async def stream_pipeline_voice_turn_events(
                 ready.append(pending_audio_events.pop(next_audio_index_to_emit))
                 next_audio_index_to_emit += 1
             return ready
+
+        def cancel_bridge() -> None:
+            pass  # bridge removed
 
         pending_conversation_messages: list[str] = []
 
@@ -380,6 +378,8 @@ async def stream_pipeline_voice_turn_events(
                 "intent": final_state.get("intent"),
                 "next_action": final_state.get("next_action"),
                 "task_type": final_state.get("task_type"),
+                "task_status": final_state.get("task_status"),
+                "task_result": final_state.get("task_result"),
                 "use_knowledge": final_state.get("use_knowledge", False),
                 "decision_reason": final_state.get("decision_reason"),
                 "conversation_id": final_state.get("conversation_id"),
