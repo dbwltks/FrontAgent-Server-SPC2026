@@ -285,7 +285,8 @@ async def chat(req: ChatRequest):
             session_id=req.session_id,
             conversation_id=result.get("conversation_id"),
 
-            # decision_node 결과
+            # agent_node 결과 (tool 미호출 케이스 대비 .get(key, default)가 아니라
+            # None도 함께 걸러낸다 - 키 자체는 항상 존재하므로 default만으로는 부족하다)
             intent=result.get("intent") or "general",
             next_action=result.get("next_action"),
             task_type=result.get("task_type"),
