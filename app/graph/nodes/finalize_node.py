@@ -9,6 +9,7 @@ from app.repositories.conversation_repo import (
     end_call_conversation,
     update_conversation_last_message,
 )
+from app.repositories.knowledge_repo import increment_reference_counts
 
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,25 @@ def _save_agent_run(state: AgentState) -> None:
         )
 
 
+def _increment_knowledge_references(state: AgentState) -> None:
+    source_ids = [
+        item.get("source_id")
+        for item in state.get("used_knowledge", [])
+        if item.get("source_id")
+    ]
+    if not source_ids:
+        return
+
+    try:
+        increment_reference_counts(source_ids)
+    except Exception:
+        logger.warning(
+            "Failed to increment knowledge reference counts: organization_id=%s",
+            state["organization_id"],
+            exc_info=True,
+        )
+
+
 def finalize_node(state: AgentState) -> AgentState:
     """
     response_node 이후 마무리 작업(AI 메시지 저장, 세션 종료 처리, agent run 로그
@@ -142,6 +162,7 @@ def finalize_node(state: AgentState) -> AgentState:
         _save_ai_message(state)
         _end_session_if_requested(state)
         _save_agent_run(state)
+        _increment_knowledge_references(state)
 
     threading.Thread(target=_run_finalize_tasks, daemon=True).start()
 

@@ -187,7 +187,7 @@ async def stream_chat_response(req: ChatRequest):
             {
                 "organization_id": req.organization_id,
                 "session_id": req.session_id,
-                "intent": final_state.get("intent"),
+                "intent": final_state.get("intent") or "general",
                 "next_action": final_state.get("next_action"),
                 "task_type": final_state.get("task_type"),
                 "use_knowledge": final_state.get("use_knowledge", False),
@@ -286,7 +286,7 @@ async def chat(req: ChatRequest):
             conversation_id=result.get("conversation_id"),
 
             # decision_node 결과
-            intent=result.get("intent", "general"),
+            intent=result.get("intent") or "general",
             next_action=result.get("next_action"),
             task_type=result.get("task_type"),
             use_knowledge=result.get("use_knowledge", False),
