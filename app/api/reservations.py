@@ -216,7 +216,7 @@ def _safe_sync_cancelled_reservation_to_calendar(
 
 
 @router.get("/services")
-def list_services_api(
+def list_reservation_services_api(
     organization_id: str = Query(
         ...,
         examples=["00000000-0000-0000-0000-000000000000"],
