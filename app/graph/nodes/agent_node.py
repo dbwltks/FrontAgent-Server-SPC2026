@@ -24,6 +24,20 @@ from app.tasks.runner import DynamicTaskRunner
 
 logger = logging.getLogger(__name__)
 
+# tool 호출 전 "네/알겠습니다/확인해드릴게요" 같은 짧은 호응(preamble) 기능.
+# False면 프롬프트·스트리밍 모두에서 호응을 쓰지 않는다.
+AGENT_PREAMBLE_ENABLED = False
+
+NO_AGENT_PREAMBLE_INSTRUCTION = """
+[호응(preamble) 비활성 — 최우선]
+- "네", "알겠습니다", "확인해드릴게요", "잠시만요", "예약 도와드릴게요"처럼
+  본답 없이 짧게 받아주는 호응만 단독으로 출력하지 않는다.
+- search_knowledge/run_task 등 도구를 호출할 때 tool 호출 전·후에
+  별도 호응 문장을 붙이지 않는다. tool 실행 결과(또는 tool 없이 만든 본답)만 전달한다.
+- 도구를 쓰는 턴에는 확인·요약·전환 멘트("~로 진행할게요" 등)를 앞에 붙이지 말고
+  task/지식 검색이 준 문장만 그대로 출력한다.
+""".strip()
+
 
 AGENT_SYSTEM_PROMPT_HEADER = """
 너는 실제 상담원처럼 고객 메시지에 응답하는 AI 에이전트다.
@@ -57,10 +71,6 @@ AGENT_SYSTEM_PROMPT_HEADER = """
   "그만할게요", "이제 됐어요" 등)가 보이면 end_session을 호출한다.
 - 위 네 경우가 아닌 인사·잡담·일반 대화는 도구를 호출하지 않고 바로 답한다.
 - 한 턴에 도구는 최대 1개만 호출한다. 애매하면 search_knowledge를 우선한다.
-- 도구 결과를 받은 뒤에는 그 내용만 근거로 자연스러운 한 번의 답변을 만든다.
-- 음성 통화 채널(web_call)에서 search_knowledge나 run_task를 호출하기 전에
-  "네.", "알겠습니다.", "확인해드릴게요." 같은 짧고 자연스러운 호응을 먼저 말한 뒤
-  도구를 호출한다. 호응은 한 문장, 5단어 이내로 짧게.
 """.strip()
 
 
@@ -173,17 +183,12 @@ async def _run_task(organization_id: str, session_id: str, user_message: str, ta
     return {"status": "unknown"}
 
 
-_VOICE_PREAMBLE_INSTRUCTION = (
-    "[최우선 규칙 - 음성 통화]"
-    "\nsearch_knowledge나 run_task 도구를 호출할 때는 반드시:"
-    "\n1. 먼저 사용자 발화에 맞는 짧은 호응을 텍스트로 출력한다 (예: \"네, 확인해드릴게요.\", \"예약 도와드릴게요.\")"
-    "\n2. 그 다음 도구를 호출한다."
-    "\n인사·잡담처럼 도구를 쓰지 않는 경우는 호응 없이 바로 답한다."
-)
-
-
-def build_agent_instructions(response_instructions: str, channel: str = "web_chat") -> str:
-    return f"{AGENT_SYSTEM_PROMPT_HEADER}\n\n[응답 지시문]\n{response_instructions}"
+def build_agent_instructions(response_instructions: str) -> str:
+    sections = [AGENT_SYSTEM_PROMPT_HEADER]
+    if not AGENT_PREAMBLE_ENABLED:
+        sections.append(NO_AGENT_PREAMBLE_INSTRUCTION)
+    sections.append(f"[응답 지시문]\n{response_instructions}")
+    return "\n\n".join(sections)
 
 
 # coroutine은 모델이 만든 tool_call을 agent_node가 직접 가로채 분기 처리하므로
@@ -257,7 +262,7 @@ async def agent_node(state: AgentState) -> dict:
         voice_response_style=voice_response_style,
         should_end_session=False,
     )
-    instructions = build_agent_instructions(response_instructions, channel=channel)
+    instructions = build_agent_instructions(response_instructions)
 
     model = await get_streaming_chat_model(organization_id)
     model_with_tools = model.bind_tools(AGENT_TOOLS)
@@ -272,6 +277,8 @@ async def agent_node(state: AgentState) -> dict:
 
     async for chunk in model_with_tools.astream(system_and_messages):
         if chunk.tool_call_chunks:
+            if not AGENT_PREAMBLE_ENABLED:
+                text_chunks.clear()
             has_tool_call = True
             for tc in chunk.tool_call_chunks:
                 index = tc.get("index") or 0
@@ -286,10 +293,11 @@ async def agent_node(state: AgentState) -> dict:
 
         if chunk.content and not has_tool_call:
             text_chunks.append(chunk.content)
-            writer({"type": "ai_response_delta", "delta": chunk.content})
 
     if not has_tool_call:
         final_response = "".join(text_chunks).strip()
+        if final_response:
+            writer({"type": "ai_response_delta", "delta": final_response})
         return {
             "intent": "general",
             "next_action": "respond_general",
