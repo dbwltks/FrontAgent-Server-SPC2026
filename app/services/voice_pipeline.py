@@ -187,13 +187,6 @@ async def stream_pipeline_voice_turn_events(
             audio_index += 1
             tts_tasks.append(asyncio.create_task(synth_worker(index, segment_text)))
 
-        # STT 완료 직후 브릿지("잠시만요.") 합성을 index=0으로 시작한다.
-        # LLM과 병렬로 ~500ms 안에 완료되므로, LLM 루프 시작 직전에 await하면
-        # 대기 없이 즉시 클라이언트로 전송된다. 본답변은 index=1부터 이어진다.
-        bridge_task = asyncio.create_task(synth_worker(0, "잠시만요."))
-        audio_index += 1
-        tts_tasks.append(bridge_task)
-
         pending_audio_events: dict[int, str] = {}
         next_audio_index_to_emit = 0
 
@@ -216,8 +209,6 @@ async def stream_pipeline_voice_turn_events(
 
         def on_delta(delta: str) -> None:
             answer_chunks.append(delta)
-            # 문장이 완성된 만큼만 백그라운드 합성 예약한다. 준비된 오디오는
-            # 호출자 쪽 루프에서 drain_ready_audio()로 흘려보낸다.
             nonlocal tts_buffer
             tts_buffer += delta
             segments, tts_buffer = split_tts_segments(tts_buffer)
@@ -245,12 +236,6 @@ async def stream_pipeline_voice_turn_events(
                 )
             )
 
-        # 브릿지 합성이 완료됐으면 즉시 발송, 아직이면 완료까지만 기다린다.
-        # 어느 경로든(일반/지식/태스크) 브릿지가 먼저 재생되고 본답변이 이어진다.
-        await bridge_task
-        for audio_event in drain_ready_audio():
-            yield audio_event
-
         async for event, data in stream_agent_graph_events(
             agent_graph=agent_graph,
             initial_state=initial_state,
@@ -262,6 +247,8 @@ async def stream_pipeline_voice_turn_events(
             if event == "final_state":
                 final_state = data
                 continue
+            # voice_preamble: tool_call 확정 즉시 호응 텍스트를 TTS로 바로 합성.
+            # split_tts_segments를 거치지 않고 즉시 schedule해 지연 없이 재생.
             yield sse_event(event, data)
             for audio_event in drain_ready_audio():
                 yield audio_event

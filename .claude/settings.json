@@ -30,7 +30,29 @@
       "mcp__supabase__execute_sql",
       "Bash(redis-cli del *)",
       "Bash(git fetch *)",
-      "Bash(git checkout *)"
+      "Bash(git checkout *)",
+      "Bash(git stash *)",
+      "Bash(git pull *)",
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(gh pr create --title 'feat: 리얼타임 툴 구조 개선 및 응답 속도 최적화' --body ' *)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:developers.openai.com)",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"err2___TRACKED_VAR__\",\"message\":\"안녕\",\"stream\":false,\"channel\":\"web_call\"}')",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"ok___TRACKED_VAR__\",\"message\":\"안녕\",\"stream\":false}')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('ok:', d.get\\('message',''\\)[:50]\\)\")",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"ok2___TRACKED_VAR__\",\"message\":\"안녕하세요\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"reload___TRACKED_VAR__\",\"message\":\"안녕하세요\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('mode:', d.get\\('mode'\\)\\)\")",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"stash___TRACKED_VAR__\",\"message\":\"안녕하세요\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"check___TRACKED_VAR__\",\"message\":\"안녕\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"fix___TRACKED_VAR__\",\"message\":\"안녕\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(python3 -c \"import json,sys; lines=sys.stdin.read\\(\\).split\\('\\\\n'\\); d=json.loads\\(lines[0]\\); print\\('msg:', d.get\\('message',d.get\\('detail',''\\)\\)[:50]\\); print\\(lines[-1]\\)\")",
+      "Bash(redis-cli get *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('chat:', d.get\\('message',''\\)[:60]\\)\")",
+      "Bash(curl -s -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"clean___TRACKED_VAR__\",\"message\":\"안녕\",\"stream\":false}' -w '\\\\nHTTP:%{http_code}')",
+      "Bash(curl -s -X POST http://localhost:8000/voice/call/end -H 'Content-Type: application/json' -d '{\"organization_id\":\"a55c98f9-74ba-40d8-bc9d-bc3f1c0870da\",\"session_id\":\"test\"}' -w '\\\\nHTTP:%{http_code}')"
     ]
   }
 }

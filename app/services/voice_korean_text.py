@@ -165,7 +165,7 @@ def normalize_text_for_korean_speech(text: str) -> str:
 # delta가 쌓이다 문장 경계를 만나면 그 구간만 먼저 합성해 오디오를 흘려보낸다.
 # 숫자 사이의 마침표(1.5)는 경계로 보지 않아 금액/날짜 전처리가 깨지지 않게 한다.
 TTS_BOUNDARY_RE = re.compile(r"(?<!\d)[.!?。！？](?!\d)|\n")
-MIN_TTS_SEGMENT_CHARS = 12
+MIN_TTS_SEGMENT_CHARS = 8
 MAX_TTS_SEGMENT_CHARS = 160
 
 

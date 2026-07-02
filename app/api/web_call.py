@@ -274,11 +274,14 @@ def build_web_call_realtime_session_config(ai_settings: dict | None = None) -> d
         ),
         "audio": {
             "input": {
+                # far_field: 노트북 내장 마이크나 스피커폰 등 거리가 있는 환경에
+                # 더 적합. 브라우저 웹 통화는 환경이 다양하므로 far_field가 안전.
+                "noise_reduction": {"type": "far_field"},
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.6,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
+                    "type": "semantic_vad",
+                    # low: 최대 8초까지 기다려 발화 중간 끊김 방지.
+                    # 짧은 단어(네/아니요) 후 침묵도 충분히 기다린다.
+                    "eagerness": "low",
                     "create_response": True,
                     "interrupt_response": True,
                 },

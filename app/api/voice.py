@@ -361,11 +361,10 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
         ),
         "audio": {
             "input": {
+                "noise_reduction": {"type": "far_field"},
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.6,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700,
+                    "type": "semantic_vad",
+                    "eagerness": "low",
                     "create_response": True,
                     "interrupt_response": True,
                 },

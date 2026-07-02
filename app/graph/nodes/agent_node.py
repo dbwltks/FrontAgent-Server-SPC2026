@@ -58,6 +58,9 @@ AGENT_SYSTEM_PROMPT_HEADER = """
 - 위 네 경우가 아닌 인사·잡담·일반 대화는 도구를 호출하지 않고 바로 답한다.
 - 한 턴에 도구는 최대 1개만 호출한다. 애매하면 search_knowledge를 우선한다.
 - 도구 결과를 받은 뒤에는 그 내용만 근거로 자연스러운 한 번의 답변을 만든다.
+- 음성 통화 채널(web_call)에서 search_knowledge나 run_task를 호출하기 전에
+  "네.", "알겠습니다.", "확인해드릴게요." 같은 짧고 자연스러운 호응을 먼저 말한 뒤
+  도구를 호출한다. 호응은 한 문장, 5단어 이내로 짧게.
 """.strip()
 
 
@@ -170,7 +173,16 @@ async def _run_task(organization_id: str, session_id: str, user_message: str, ta
     return {"status": "unknown"}
 
 
-def build_agent_instructions(response_instructions: str) -> str:
+_VOICE_PREAMBLE_INSTRUCTION = (
+    "[최우선 규칙 - 음성 통화]"
+    "\nsearch_knowledge나 run_task 도구를 호출할 때는 반드시:"
+    "\n1. 먼저 사용자 발화에 맞는 짧은 호응을 텍스트로 출력한다 (예: \"네, 확인해드릴게요.\", \"예약 도와드릴게요.\")"
+    "\n2. 그 다음 도구를 호출한다."
+    "\n인사·잡담처럼 도구를 쓰지 않는 경우는 호응 없이 바로 답한다."
+)
+
+
+def build_agent_instructions(response_instructions: str, channel: str = "web_chat") -> str:
     return f"{AGENT_SYSTEM_PROMPT_HEADER}\n\n[응답 지시문]\n{response_instructions}"
 
 
@@ -227,6 +239,7 @@ async def agent_node(state: AgentState) -> dict:
     organization_id = state["organization_id"]
     session_id = state["session_id"]
     user_message = state["user_message"]
+    channel = state.get("channel", "web_chat")
     conversation_history = history_from_state_messages(state.get("messages", []))
 
     rules, voice_response_style = await asyncio.gather(
@@ -240,11 +253,11 @@ async def agent_node(state: AgentState) -> dict:
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
         rules=rules,
-        channel=state.get("channel", "web_chat"),
+        channel=channel,
         voice_response_style=voice_response_style,
         should_end_session=False,
     )
-    instructions = build_agent_instructions(response_instructions)
+    instructions = build_agent_instructions(response_instructions, channel=channel)
 
     model = await get_streaming_chat_model(organization_id)
     model_with_tools = model.bind_tools(AGENT_TOOLS)
