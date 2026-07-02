@@ -247,8 +247,6 @@ async def stream_pipeline_voice_turn_events(
             if event == "final_state":
                 final_state = data
                 continue
-            # voice_preamble: tool_call 확정 즉시 호응 텍스트를 TTS로 바로 합성.
-            # split_tts_segments를 거치지 않고 즉시 schedule해 지연 없이 재생.
             yield sse_event(event, data)
             for audio_event in drain_ready_audio():
                 yield audio_event
