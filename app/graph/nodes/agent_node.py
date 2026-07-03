@@ -10,7 +10,19 @@ from pydantic import BaseModel, Field
 
 from app.graph.message_utils import history_from_state_messages
 from app.graph.prompt_builder import build_response_instructions
+from app.graph.session_end_detection import (
+    is_obvious_end_session_request,
+    is_obvious_handoff_request,
+    try_general_fast_path_response,
+)
 from app.graph.state import AgentState
+from app.graph.task_context import (
+    build_task_result_meta,
+    has_active_task_session,
+    resolve_active_task_step,
+    resolve_task_variables,
+    slim_task_result,
+)
 from app.providers.langchain_provider import (
     get_streaming_chat_model,
     get_voice_response_style,
@@ -20,6 +32,8 @@ from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.rule_repo import get_active_rules
 from app.tasks.repository import TaskRepository
 from app.tasks.runner import DynamicTaskRunner
+from app.tasks.service_selection import build_service_selection_message
+from app.tasks.trigger_matcher import match_task_trigger
 
 
 logger = logging.getLogger(__name__)
@@ -48,10 +62,14 @@ AGENT_SYSTEM_PROMPT_HEADER = """
   단편만 가져와 부정확하거나 엉뚱한 항목을 답할 수 있다 - 반드시
   run_task(task_type: reservation_create)로 보낸다. run_task 결과가 정확한
   서비스 목록을 보여준다.
-- [현재 요청 상태]에 "진행 중인 Task가 있습니다"라고 나와 있으면, 이번 사용자
-  메시지는 그 예약을 이어가기 위한 답변(날짜, 시간, 서비스명, 인원수 등)일
-  가능성이 매우 높다. 이 경우에도 task_type을 reservation_create로 그대로
-  run_task를 다시 호출한다 - 직접 답하지 말고 항상 run_task에 맡긴다.
+- [현재 요청 상태]에 "진행 중인 Task가 있습니다"라고 나와 있으면, 사용자
+  메시지가 예약 단계 답변(성함, 날짜, 시간, 서비스명 등)이면 run_task를
+  호출한다.
+- 단, 예약 진행 중에도 가격·정책·서비스 설명·조건 확인 등 지식 베이스로
+  답해야 하는 질문(예: "취소되나요?", "주차 가능해요?", "뭐 포함돼요?",
+  "시간 얼마나 걸려요?")이면 run_task가 아니라 search_knowledge를 호출한다.
+  예약을 취소한 것처럼 말하지 말고, 지식 검색으로 답한 뒤 예약 질문을
+  이어가면 된다.
 - 사람(상담원/직원) 연결을 명시적으로 요청하면 request_handoff를 호출한다.
 - 상담·대화·통화를 끝내려는 의도("끊어줘", "통화 종료", "채팅 그만", "여기까지",
   "그만할게요", "이제 됐어요" 등)가 보이면 end_session을 호출한다.
@@ -117,50 +135,570 @@ def _build_service_selection_message(task_result: dict) -> str | None:
     """
     예약 서비스 선택 단계에서는 LLM이 서비스 목록을 다시 요약하게 하지 않고,
     task_result.variables.available_services.services 기준으로 정확한
-    선택 문구를 만든다(app/graph/nodes/response_node.py에 있던 동명 로직을
-    tool calling 구조에 맞게 옮겼다).
+    선택 문구를 만든다.
     """
-    if task_result.get("status") != "waiting_user_input":
-        return None
-    if task_result.get("current_node_key") != "ask_service":
-        return None
+    return build_service_selection_message(
+        variables=task_result.get("variables") or {},
+        current_node_key=task_result.get("current_node_key"),
+        status=task_result.get("status"),
+    )
 
-    variables = task_result.get("variables") or {}
-    available_services = variables.get("available_services") or {}
-    services = available_services.get("services") or []
-    if not services:
-        return None
 
-    service_names = [
-        str(service.get("name")).strip()
-        for service in services
-        if isinstance(service, dict) and service.get("name")
+_SERVICE_ITEM_HEADING = re.compile(
+    r"^#{1,6}\s*(?:서비스\s*아이템)\s*:?\s*(\S.*)$",
+    re.MULTILINE,
+)
+KNOWLEDGE_AMBIGUITY_GAP_THRESHOLD = 0.05
+
+
+def _normalize_service_label(text: str) -> str:
+    return re.sub(r"[\s?!.,·]+", "", text.lower())
+
+
+def _extract_service_item_names(chunks: list[dict], limit: int = 3) -> list[str]:
+    names: list[str] = []
+    for chunk in chunks[:limit]:
+        match = _SERVICE_ITEM_HEADING.search(chunk.get("content") or "")
+        if match:
+            names.append(match.group(1).strip())
+    return names
+
+
+def _user_message_specifies_service(user_message: str, service_name: str) -> bool:
+    msg = _normalize_service_label(user_message)
+    service = _normalize_service_label(service_name)
+    if len(service) < 2:
+        return False
+    return service in msg or msg in service
+
+
+def _find_user_specified_service(user_message: str, chunks: list[dict]) -> str | None:
+    seen: set[str] = set()
+    for chunk in chunks:
+        match = _SERVICE_ITEM_HEADING.search(chunk.get("content") or "")
+        if not match:
+            continue
+        name = match.group(1).strip()
+        key = _normalize_service_label(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _user_message_specifies_service(user_message, name):
+            return name
+    return None
+
+
+def _should_clarify_competing_services(
+    user_message: str,
+    chunks: list[dict],
+    *,
+    gap_threshold: float = KNOWLEDGE_AMBIGUITY_GAP_THRESHOLD,
+) -> list[str]:
+    if len(chunks) < 2:
+        return []
+
+    gap = (chunks[0].get("similarity") or 0) - (chunks[1].get("similarity") or 0)
+    if gap >= gap_threshold:
+        return []
+
+    unique_names = list(dict.fromkeys(_extract_service_item_names(chunks)))
+    if len(unique_names) < 2:
+        return []
+
+    if _find_user_specified_service(user_message, chunks):
+        return []
+
+    return unique_names
+
+
+def _prioritize_chunks_for_user_query(user_message: str, chunks: list[dict]) -> list[dict]:
+    specified = _find_user_specified_service(user_message, chunks)
+    if not specified:
+        return chunks
+
+    specified_norm = _normalize_service_label(specified)
+    matching = [
+        chunk
+        for chunk in chunks
+        if specified_norm in _normalize_service_label(chunk.get("content") or "")
     ]
-    if not service_names:
-        return None
-
-    return f"어떤 서비스를 원하시나요? {', '.join(service_names)} 중에서 선택해 주세요."
+    return matching or chunks
 
 
-async def _run_task(organization_id: str, session_id: str, user_message: str, task_type: str) -> dict:
+_TASK_SLOT_ANSWER_PATTERNS = (
+    re.compile(r"^\d{1,2}월"),
+    re.compile(r"^\d{4}[-./]\d"),
+    re.compile(r"^(내일|모레|오늘|다음\s*주|이번\s*주)"),
+    re.compile(r"^\d{1,2}\s*시"),
+    re.compile(r"^(오전|오후)\s*\d"),
+    re.compile(r"^\d{2,4}-\d{3,4}-\d{4}$"),
+    re.compile(r"^(네|아니요|아니|응|좋아요|없어요|있어요|없습니다|있습니다)$"),
+)
+_INFO_QUESTION_TOPIC = re.compile(
+    r"(가격|비용|요금|얼마|정책|취소|변경|환불|영업|운영|주차|반려|평수|포함|"
+    r"소요\s*시간|얼마나\s*걸|걸리\s*는|몇\s*분|설명|안내|범위|차이|비교|주의|준비|필요|수수료|당일|하루\s*전|"
+    r"예약\s*변경|가능|불가|뭐\s*들|무엇|어떤)",
+    re.IGNORECASE,
+)
+
+
+def _extract_service_names_from_pending_prompt(pending: str) -> list[str]:
+    match = re.search(r"\?\s*(.+?)\s*중에서\s*선택", pending)
+    if not match:
+        return []
+    return [part.strip() for part in match.group(1).split(",") if part.strip()]
+
+
+def _looks_like_task_slot_answer(user_message: str, pending_task_prompt: str | None) -> bool:
+    message = user_message.strip()
+    if not message:
+        return False
+
+    for pattern in _TASK_SLOT_ANSWER_PATTERNS:
+        if pattern.search(message):
+            return True
+
+    pending = pending_task_prompt or ""
+    if pending:
+        norm_msg = _normalize_service_label(message)
+        for service_name in _extract_service_names_from_pending_prompt(pending):
+            norm_name = _normalize_service_label(service_name)
+            if norm_name and norm_name in norm_msg:
+                return True
+
+    if ("성함" in pending or "이름" in pending) and re.fullmatch(r"[가-힣]{2,6}", message):
+        return True
+    if ("날짜" in pending or "시간" in pending) and re.search(r"\d|월|일|시|내일|모레", message):
+        return True
+    if "주소" in pending and re.search(r"(로|길|동|구|시|\d)", message) and "?" not in message:
+        return True
+    if "평수" in pending and re.fullmatch(r"\d+\s*평?", message):
+        return True
+
+    return False
+
+
+_TASK_PROGRESS_KEYS = (
+    "service_item_id",
+    "customer_name",
+    "reservation_date",
+    "reservation_time",
+    "phone",
+    "address",
+)
+
+
+def _resolved_service_item_id(variables: dict) -> str | None:
+    for key, value in variables.items():
+        if not key.endswith("_resolve_result") and key != "resolve_service_item_result":
+            continue
+        if isinstance(value, dict) and value.get("ok") and value.get("service_item_id"):
+            return str(value["service_item_id"])
+    direct = variables.get("service_item_id")
+    return str(direct) if direct else None
+
+
+def _task_turn_made_progress(
+    *,
+    before_step: str | None,
+    before_vars: dict,
+    after_step: str | None,
+    after_vars: dict,
+    task_status: str | None,
+) -> bool:
+    if task_status in ("completed", "handoff"):
+        return True
+    if before_step and after_step and before_step != after_step:
+        return True
+
+    before_service_id = _resolved_service_item_id(before_vars)
+    after_service_id = _resolved_service_item_id(after_vars)
+    if after_service_id and before_service_id != after_service_id:
+        return True
+
+    for key in _TASK_PROGRESS_KEYS:
+        if key == "service_item_id":
+            continue
+        before_val = before_vars.get(key)
+        after_val = after_vars.get(key)
+        if after_val and str(before_val or "").strip() != str(after_val).strip():
+            return True
+
+    return False
+
+
+def _looks_like_knowledge_interrupt(
+    user_message: str,
+    pending_task_prompt: str | None = None,
+) -> bool:
+    """
+    예약 task 진행 중 사용자가 slot 답변 대신 정보/정책/설명을 묻는지 판별.
+    가격(얼마)만이 아니라 취소·주차·포함항목·소요시간 등 FAQ 전반을 포함한다.
+    """
+    message = user_message.strip()
+    if not message:
+        return False
+
+    if _looks_like_task_slot_answer(message, pending_task_prompt):
+        return False
+
+    if re.match(r"^(근데|그런데|아니|잠깐|미안)", message):
+        return True
+
+    has_question_form = bool(
+        re.search(
+            r"(\?|인가요|인가|되나요|될까요|할까요|알려|알려줘|뭐야|뭐에요|무엇|어떻게|궁금)",
+            message,
+        )
+    )
+    has_info_topic = bool(_INFO_QUESTION_TOPIC.search(message))
+
+    if has_question_form:
+        return True
+    if has_info_topic and len(message) > 4:
+        return True
+
+    return False
+
+
+def _compose_direct_knowledge_answer(
+    *,
+    user_message: str,
+    chunks: list[dict],
+    clarify_items: list[str],
+    resume_task_prompt: str | None,
+    skip_service_clarify: bool,
+) -> str:
+    if clarify_items:
+        return (
+            f"어떤 서비스를 말씀하시는 걸까요? "
+            f"{', '.join(clarify_items)} 중에서 알려주시면 안내해 드릴게요."
+        )
+    if not chunks:
+        return "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
+
+    answer_chunks = _prioritize_chunks_for_user_query(user_message, chunks)
+    if skip_service_clarify:
+        parts: list[str] = []
+        seen: set[str] = set()
+        for chunk in answer_chunks[:4]:
+            summary = summarize_knowledge_chunk(chunk)
+            if not summary or summary in seen:
+                continue
+            seen.add(summary)
+            parts.append(summary)
+        message = " ".join(parts) if parts else (summarize_knowledge_chunk(answer_chunks[0]) or "")
+    else:
+        message = summarize_knowledge_chunk(answer_chunks[0]) or ""
+
+    message = message.strip()
+    if resume_task_prompt:
+        message = f"{message} {resume_task_prompt}"
+    return message
+
+
+def _resolve_pending_task_prompt(state: AgentState) -> str | None:
+    task_result = state.get("task_result") or {}
+    message = (task_result.get("message") or "").strip()
+    return message or None
+
+
+def _extract_available_service_names(variables: dict) -> list[str]:
+    available = variables.get("available_services") or {}
+    services = available.get("services") or []
+    names: list[str] = []
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        name = str(service.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _build_knowledge_search_query(
+    user_message: str,
+    organization_id: str,
+    session_id: str,
+) -> str:
+    query_parts = [user_message.strip()]
+    variables = resolve_task_variables(organization_id, session_id)
+    for key in (
+        "service_item_name",
+        "service_item_text",
+        "resolved_service_item_name",
+        "service_name",
+    ):
+        value = variables.get(key)
+        if not value:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in user_message.lower():
+            query_parts.append(text)
+
+    service_names = _extract_available_service_names(variables)
+    normalized_message = _normalize_service_label(user_message)
+    has_service_in_message = any(
+        _normalize_service_label(name) in normalized_message for name in service_names
+    )
+    if service_names and not has_service_in_message:
+        query_parts.extend(service_names[:6])
+
+    query = " ".join(part for part in query_parts if part)
+    if re.search(r"얼마|가격|비용|요금", user_message) and "가격" not in query:
+        query = f"{query} 가격"
+    return query
+
+
+def _is_generic_price_question(user_message: str) -> bool:
+    return bool(re.search(r"얼마|가격|비용|요금", user_message))
+
+
+def _should_skip_service_clarify_for_faq(
+    user_message: str,
+    *,
+    task_step: str | None,
+    resume_task_prompt: str | None,
+) -> bool:
+    """
+    서비스 선택 단계에서 '얼마예요?'처럼 특정 서비스 없이 가격만 물을 때는
+    clarify(어느 서비스?)로 되돌리지 않고 검색 결과로 전체/복수 안내한다.
+    """
+    if task_step != "ask_service":
+        return False
+    if not _is_generic_price_question(user_message):
+        return False
+    pending = resume_task_prompt or ""
+    return "어떤 서비스" in pending or "선택" in pending
+
+
+def _applied_rule_names(rules: list[dict]) -> list[str]:
+    return [rule.get("name", "unnamed_rule") for rule in rules]
+
+
+def _attach_rules(payload: dict, rules: list[dict]) -> dict:
+    payload["rules"] = rules
+    payload["applied_rules"] = _applied_rule_names(rules)
+    return payload
+
+
+def _build_general_response_state(*, message: str) -> dict:
+    return {
+        "intent": "general",
+        "next_action": "respond_general",
+        "task_type": "none",
+        "use_knowledge": False,
+        "should_use_knowledge": False,
+        "should_end_session": False,
+        "final_response": message,
+        "rules": [],
+        "applied_rules": [],
+        "messages": [{"role": "assistant", "content": message}],
+    }
+
+
+async def _execute_search_knowledge(
+    *,
+    organization_id: str,
+    user_message: str,
+    search_query: str,
+    writer,
+    resume_task_prompt: str | None = None,
+    preserve_active_task: bool = False,
+    active_task: str | None = None,
+    task_step: str | None = None,
+    task_result: dict | None = None,
+    rules: list[dict] | None = None,
+) -> dict:
+    writer({"type": "knowledge_start", "queries": [search_query]})
+    match_count = 5 if _should_skip_service_clarify_for_faq(
+        user_message,
+        task_step=task_step,
+        resume_task_prompt=resume_task_prompt,
+    ) else 3
+    chunks = await retrieve_knowledge(
+        organization_id=organization_id,
+        query=search_query,
+        match_count=match_count,
+    )
+    used_knowledge = [
+        {
+            "chunk_id": c.get("id"),
+            "source_id": c.get("source_id"),
+            "source_title": c.get("source_title"),
+            "similarity": c.get("similarity"),
+        }
+        for c in chunks
+    ]
+
+    skip_service_clarify = _should_skip_service_clarify_for_faq(
+        user_message,
+        task_step=task_step,
+        resume_task_prompt=resume_task_prompt,
+    )
+    clarify_items: list[str] = []
+    if not skip_service_clarify:
+        clarify_items = _should_clarify_competing_services(user_message, chunks)
+
+    direct_message = _compose_direct_knowledge_answer(
+        user_message=user_message,
+        chunks=chunks,
+        clarify_items=clarify_items,
+        resume_task_prompt=resume_task_prompt,
+        skip_service_clarify=skip_service_clarify,
+    )
+    if direct_message:
+        writer({"type": "ai_response_delta", "delta": direct_message})
+
+    result = {
+        "intent": "faq",
+        "next_action": "search_knowledge",
+        "task_type": "none",
+        "use_knowledge": True,
+        "should_use_knowledge": True,
+        "should_end_session": False,
+        "knowledge_context": [],
+        "used_knowledge": used_knowledge,
+        "final_response": direct_message,
+        "messages": [{"role": "assistant", "content": direct_message}],
+    }
+    if preserve_active_task:
+        result["active_task"] = active_task
+        result["task_step"] = task_step
+        preserved = slim_task_result(task_result) or {}
+        if resume_task_prompt and not preserved.get("message"):
+            preserved["message"] = resume_task_prompt
+        result["task_result"] = preserved or None
+    if rules is not None:
+        _attach_rules(result, rules)
+    return result
+
+
+def _resolve_task_type_for_continue(state: AgentState) -> str:
+    task_type = state.get("task_type")
+    if task_type and task_type != "none":
+        return task_type
+    return "reservation_create"
+
+
+def _build_end_session_state(*, farewell_message: str, rules: list[dict] | None = None) -> dict:
+    message = farewell_message.strip() or "네, 감사합니다. 좋은 하루 되세요."
+    payload = {
+        "intent": "end_session",
+        "next_action": "end_session",
+        "task_type": "none",
+        "use_knowledge": False,
+        "should_use_knowledge": False,
+        "should_end_session": True,
+        "final_response": message,
+        "messages": [{"role": "assistant", "content": message}],
+    }
+    if rules is not None:
+        _attach_rules(payload, rules)
+    else:
+        payload["rules"] = []
+        payload["applied_rules"] = []
+    return payload
+
+
+def _build_handoff_state(*, rules: list[dict] | None = None) -> dict:
+    payload = {
+        "intent": "handoff",
+        "next_action": "handoff",
+        "task_type": "none",
+        "use_knowledge": False,
+        "should_use_knowledge": False,
+        "should_end_session": False,
+        "final_response": None,
+    }
+    if rules is not None:
+        _attach_rules(payload, rules)
+    else:
+        payload["rules"] = []
+        payload["applied_rules"] = []
+    return payload
+
+
+async def _execute_run_task_turn(
+    *,
+    organization_id: str,
+    session_id: str,
+    user_message: str,
+    task_type: str,
+    writer,
+    rules: list[dict] | None = None,
+    emit_delta: bool = True,
+    flow_id: str | None = None,
+) -> dict:
+    task_result = await _run_task(
+        organization_id,
+        session_id,
+        user_message,
+        task_type,
+        flow_id=flow_id,
+    )
+
+    direct_message = _build_service_selection_message(task_result) or (task_result.get("message") or "").strip()
+    if not direct_message:
+        direct_message = "요청하신 내용을 처리하지 못했습니다. 다시 한 번 말씀해 주시겠어요?"
+
+    if emit_delta:
+        writer({"type": "ai_response_delta", "delta": direct_message})
+
+    task_status = task_result.get("status")
+    still_active = task_status == "waiting_user_input"
+    slim = slim_task_result(task_result) or {}
+    if still_active:
+        slim["message"] = direct_message
+
+    payload = {
+        "intent": "reservation",
+        "next_action": "run_task",
+        "task_type": task_type,
+        "use_knowledge": False,
+        "should_use_knowledge": False,
+        "should_end_session": False,
+        "active_task": "reservation" if still_active else None,
+        "task_step": task_result.get("current_node_key") if still_active else None,
+        "task_result": slim if still_active else slim_task_result(task_result),
+        "task_status": task_status,
+        "final_response": direct_message,
+        "messages": [{"role": "assistant", "content": direct_message}],
+    }
+    if rules is not None:
+        _attach_rules(payload, rules)
+    else:
+        payload["rules"] = []
+        payload["applied_rules"] = []
+    return payload
+
+
+async def _run_task(
+    organization_id: str,
+    session_id: str,
+    user_message: str,
+    task_type: str,
+    *,
+    flow_id: str | None = None,
+) -> dict:
     repository = TaskRepository()
     runner = DynamicTaskRunner(repository=repository)
     writer = get_stream_writer()
 
     active_session = repository.find_active_session(organization_id=organization_id, session_id=session_id)
 
-    flow_id = None
-    if active_session is None:
+    resolved_flow_id = flow_id
+    if active_session is None and resolved_flow_id is None:
         flow = repository.find_enabled_flow_for_task_type(organization_id=organization_id, task_type=task_type)
         if not flow:
             return {"status": "failed", "error": f"task_type에 맞는 활성 태스크가 없습니다: {task_type}"}
-        flow_id = flow["id"]
+        resolved_flow_id = flow["id"]
 
     task_response = await runner.run(
         organization_id=organization_id,
         session_id=session_id,
         user_message=user_message,
-        flow_id=flow_id,
+        flow_id=resolved_flow_id if active_session is None else None,
         on_trace=lambda item: writer({"type": "task_step", "step": item}),
     )
 
@@ -227,10 +765,14 @@ async def agent_node(state: AgentState) -> dict:
     분류용 별도 LLM 호출이나 그래프 분기 노드가 필요 없다.
 
     노드 자체의 호출 순서는:
-    1. 활성 규칙 조회(캐시) + 응답 지시문 조립 (병렬)
-    2. tool을 묶은 1차 LLM 스트리밍 호출
-    3. tool 호출이 없으면 1차 응답이 곧 최종 답변(이미 스트리밍됨)
-    4. tool 호출이 있으면 tool을 직접 실행하고, 그 결과를 다시 LLM에 보내
+    1. 활성 규칙 조회(캐시) + (필요 시) 응답 지시문 조립
+    2. 진행 중 Task가 있으면 agent LLM을 생략하고 코드로 라우팅한다:
+       run_task를 먼저 시도하고, slot이 실제로 채워지지 않았을 때만
+       search_knowledge(FAQ)로 넘긴다. 종료/상담원 요청은 각 handler.
+    3. Task가 없으면 task_flows 트리거 매칭 → 매칭되면 run_task 직행
+    4. 매칭되지 않으면 tool을 묶은 1차 LLM 스트리밍 호출
+    5. tool 호출이 없으면 1차 응답이 곧 최종 답변(이미 스트리밍됨)
+    6. tool 호출이 있으면 tool을 직접 실행하고, 그 결과를 다시 LLM에 보내
        답변을 재작성시키지 않는다 - tool 결과(검색된 지식, task 노드의 안내
        문구)를 가공 없이 그대로 최종 답변으로 쓴다. 이러면 LLM round-trip이
        항상 1회로 끝나 체감 지연이 절반 가까이 줄어든다(자연스러운 문장
@@ -241,17 +783,143 @@ async def agent_node(state: AgentState) -> dict:
     user_message = state["user_message"]
     channel = state.get("channel", "web_chat")
     conversation_history = history_from_state_messages(state.get("messages", []))
+    writer = get_stream_writer()
 
-    rules, voice_response_style = await asyncio.gather(
-        get_active_rules_async(organization_id),
-        get_voice_response_style(organization_id),
+    if not state.get("active_task"):
+        has_prior_assistant_turn = any(
+            msg.get("role") == "assistant" for msg in conversation_history
+        )
+        fast_response = try_general_fast_path_response(
+            user_message,
+            has_prior_assistant_turn=has_prior_assistant_turn,
+        )
+        if fast_response:
+            writer({"type": "ai_response_delta", "delta": fast_response})
+            return _build_general_response_state(message=fast_response)
+
+    has_active_task = has_active_task_session(
+        organization_id,
+        session_id,
+        active_task=state.get("active_task"),
     )
+    pending_task_prompt = _resolve_pending_task_prompt(state)
+
+    rules = await asyncio.to_thread(get_active_rules, organization_id)
+
+    voice_response_style = "friendly_short"
+    if channel in {"web_call", "voice"}:
+        voice_response_style = await get_voice_response_style(organization_id)
+
+    if has_active_task:
+        if is_obvious_end_session_request(user_message):
+            farewell_message = "네, 감사합니다. 좋은 하루 되세요."
+            writer({"type": "ai_response_delta", "delta": farewell_message})
+            return _build_end_session_state(farewell_message=farewell_message, rules=rules)
+
+        if is_obvious_handoff_request(user_message):
+            return _build_handoff_state(rules=rules)
+
+        task_type = _resolve_task_type_for_continue(state)
+        before_step = resolve_active_task_step(
+            organization_id,
+            session_id,
+            task_step=state.get("task_step"),
+        )
+        before_vars = resolve_task_variables(organization_id, session_id)
+
+        task_state = await _execute_run_task_turn(
+            organization_id=organization_id,
+            session_id=session_id,
+            user_message=user_message,
+            task_type=task_type,
+            writer=writer,
+            rules=rules,
+            emit_delta=False,
+        )
+
+        after_step = task_state.get("task_step") or (task_state.get("task_result") or {}).get("current_node_key")
+        after_vars = resolve_task_variables(organization_id, session_id)
+        made_progress = _task_turn_made_progress(
+            before_step=before_step,
+            before_vars=before_vars,
+            after_step=after_step,
+            after_vars=after_vars,
+            task_status=task_state.get("task_status"),
+        )
+
+        if made_progress:
+            writer({"type": "ai_response_delta", "delta": task_state["final_response"]})
+            return task_state
+
+        if _looks_like_knowledge_interrupt(user_message, pending_task_prompt):
+            task_result_meta = build_task_result_meta(
+                task_result=state.get("task_result"),
+                organization_id=organization_id,
+                session_id=session_id,
+            )
+            resume_prompt = pending_task_prompt or (task_result_meta or {}).get("message")
+            search_query = _build_knowledge_search_query(
+                user_message,
+                organization_id,
+                session_id,
+            )
+            return await _execute_search_knowledge(
+                organization_id=organization_id,
+                user_message=user_message,
+                search_query=search_query,
+                writer=writer,
+                rules=rules,
+                resume_task_prompt=resume_prompt,
+                preserve_active_task=True,
+                active_task=state.get("active_task") or "reservation",
+                task_step=resolve_active_task_step(
+                    organization_id,
+                    session_id,
+                    task_step=state.get("task_step"),
+                ),
+                task_result=task_result_meta,
+            )
+
+        writer({"type": "ai_response_delta", "delta": task_state["final_response"]})
+        return task_state
+
+    if not has_active_task:
+        repository = TaskRepository()
+        enabled_flows = await asyncio.to_thread(repository.list_enabled_flows, organization_id)
+        trigger_match = match_task_trigger(
+            user_message,
+            enabled_flows,
+            channel=channel,
+        )
+        if trigger_match:
+            writer(
+                {
+                    "type": "task_trigger_matched",
+                    "flow_id": trigger_match.flow_id,
+                    "task_type": trigger_match.task_type,
+                    "reason": trigger_match.match_reason,
+                    "score": trigger_match.score,
+                }
+            )
+            return await _execute_run_task_turn(
+                organization_id=organization_id,
+                session_id=session_id,
+                user_message=user_message,
+                task_type=trigger_match.task_type,
+                flow_id=trigger_match.flow_id,
+                writer=writer,
+                rules=rules,
+            )
+
     response_instructions = build_response_instructions(
         intent=None,
         knowledge_context=[],
         use_knowledge=False,
         active_task=state.get("active_task"),
         task_step=state.get("task_step"),
+        task_result=state.get("task_result"),
+        has_active_task=has_active_task,
+        pending_task_prompt=pending_task_prompt,
         rules=rules,
         channel=channel,
         voice_response_style=voice_response_style,
@@ -265,7 +933,6 @@ async def agent_node(state: AgentState) -> dict:
     messages = history_to_messages(conversation_history) + [{"role": "user", "content": user_message}]
     system_and_messages = [{"role": "system", "content": instructions}] + messages
 
-    writer = get_stream_writer()
     tool_call_chunks: dict[int, dict] = {}
     text_chunks: list[str] = []
     has_tool_call = False
@@ -290,18 +957,19 @@ async def agent_node(state: AgentState) -> dict:
 
     if not has_tool_call:
         final_response = "".join(text_chunks).strip()
-        return {
-            "intent": "general",
-            "next_action": "respond_general",
-            "task_type": "none",
-            "use_knowledge": False,
-            "should_use_knowledge": False,
-            "final_response": final_response,
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-            "should_end_session": False,
-            "messages": [{"role": "assistant", "content": final_response}],
-        }
+        return _attach_rules(
+            {
+                "intent": "general",
+                "next_action": "respond_general",
+                "task_type": "none",
+                "use_knowledge": False,
+                "should_use_knowledge": False,
+                "final_response": final_response,
+                "should_end_session": False,
+                "messages": [{"role": "assistant", "content": final_response}],
+            },
+            rules,
+        )
 
     # tool 호출 처리: 인덱스 0 도구 하나만 지원한다(시스템 프롬프트가 한 턴에
     # 최대 1개만 부르도록 지시한다).
@@ -313,152 +981,46 @@ async def agent_node(state: AgentState) -> dict:
         tool_args = {}
 
     if tool_name not in AGENT_TOOLS_BY_NAME:
-        return {
-            "intent": "general",
-            "next_action": "respond_general",
-            "task_type": "none",
-            "use_knowledge": False,
-            "should_use_knowledge": False,
-            "should_end_session": False,
-            "final_response": "죄송합니다, 요청을 처리하지 못했습니다.",
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-        }
+        return _attach_rules(
+            {
+                "intent": "general",
+                "next_action": "respond_general",
+                "task_type": "none",
+                "use_knowledge": False,
+                "should_use_knowledge": False,
+                "should_end_session": False,
+                "final_response": "죄송합니다, 요청을 처리하지 못했습니다.",
+            },
+            rules,
+        )
 
     if tool_name == "end_session":
         farewell_message = (tool_args.get("farewell_message") or "").strip() or "네, 감사합니다. 좋은 하루 되세요."
         writer({"type": "ai_response_delta", "delta": farewell_message})
-        return {
-            "intent": "end_session",
-            "next_action": "end_session",
-            "task_type": "none",
-            "use_knowledge": False,
-            "should_use_knowledge": False,
-            "should_end_session": True,
-            "final_response": farewell_message,
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-            "messages": [{"role": "assistant", "content": farewell_message}],
-        }
+        return _build_end_session_state(farewell_message=farewell_message, rules=rules)
 
     if tool_name == "search_knowledge":
-        writer({"type": "knowledge_start", "queries": [tool_args.get("query", user_message)]})
-        intent, next_action = "faq", "search_knowledge"
-        chunks = await retrieve_knowledge(
+        search_query = tool_args.get("query", user_message)
+        return await _execute_search_knowledge(
             organization_id=organization_id,
-            query=tool_args.get("query", user_message),
-            match_count=3,
+            user_message=user_message,
+            search_query=search_query,
+            writer=writer,
+            rules=rules,
+            resume_task_prompt=pending_task_prompt if has_active_task else None,
+            preserve_active_task=has_active_task,
+            active_task=state.get("active_task"),
+            task_step=state.get("task_step"),
+            task_result=state.get("task_result"),
         )
-        knowledge_context = chunks
-        used_knowledge = [
-            {
-                "chunk_id": c.get("id"),
-                "source_id": c.get("source_id"),
-                "source_title": c.get("source_title"),
-                "similarity": c.get("similarity"),
-            }
-            for c in chunks
-        ]
-
-        # tool 결과를 받아 답변을 다시 작성하는 2차 LLM 호출을 생략한다 -
-        # 검색된 chunk 내용을 그대로 최종 답변으로 쓴다. 자연스러운 문장
-        # 재구성은 포기하지만 LLM round-trip을 1번 줄여 체감 지연을 절반
-        # 가까이 낮춘다. 다만 chunk를 전부 이어붙이면(특히 음성 통화에서)
-        # 마크다운 헤더나 중복 chunk까지 그대로 다 읽어버려 듣기 힘들어지므로
-        # (실측: 494자) 가장 유사도 높은 chunk 1개만, 그것도 일정 길이로
-        # 잘라서 쓴다.
-        #
-        # 1등과 2등 chunk의 유사도 차이가 작으면(서로 다른 서비스 항목이
-        # 비슷한 점수로 경쟁 중이라는 뜻) "가격이 얼마예요?"처럼 서비스명을
-        # 안 밝힌 모호한 질문일 가능성이 높다 - 둘 다 헤더가 있는 항목형
-        # chunk라면(같은 카테고리 안 여러 항목 중 헷갈리는 상황) 임의로
-        # 하나를 답하지 않고 어떤 항목인지 되묻는다. 일반 FAQ(영업시간,
-        # 정책 등)는 헤더가 없는 단일 chunk라 이 분기를 타지 않는다.
-        AMBIGUITY_GAP_THRESHOLD = 0.05
-        item_names = []
-        if len(chunks) >= 2:
-            gap = (chunks[0].get("similarity") or 0) - (chunks[1].get("similarity") or 0)
-            if gap < AMBIGUITY_GAP_THRESHOLD:
-                for c in chunks[:3]:
-                    match = re.search(r"^#{1,6}\s*(?:서비스\s*아이템)\s*:?\s*(\S.*)$", c.get("content") or "", re.MULTILINE)
-                    if match:
-                        item_names.append(match.group(1).strip())
-
-        if item_names and len(set(item_names)) >= 2:
-            direct_message = f"어떤 서비스를 말씀하시는 걸까요? {', '.join(dict.fromkeys(item_names))} 중에서 알려주시면 안내해 드릴게요."
-        else:
-            direct_message = summarize_knowledge_chunk(chunks[0]) if chunks else None
-            if not direct_message:
-                direct_message = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
-        writer({"type": "ai_response_delta", "delta": direct_message})
-        return {
-            "intent": intent,
-            "next_action": next_action,
-            "task_type": "none",
-            "use_knowledge": True,
-            "should_use_knowledge": True,
-            "should_end_session": False,
-            "knowledge_context": knowledge_context,
-            "used_knowledge": used_knowledge,
-            "final_response": direct_message,
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-            "messages": [{"role": "assistant", "content": direct_message}],
-        }
     elif tool_name == "run_task":
-        intent, next_action = "reservation", "run_task"
-        task_result = await _run_task(organization_id, session_id, user_message, tool_args.get("task_type", "reservation_create"))
-
-        # task 결과를 받아 답변을 다시 작성하는 2차 LLM 호출을 생략한다.
-        # 서비스 선택 단계는 정확한 목록이 있으므로 코드로 직접 문장을
-        # 조립한다(LLM이 빈 목록을 그럴듯하게 지어내는 사례가 실측됐다 -
-        # 빌트인 규칙 "모르면 지어내지 않기"를 어김). 그 외 단계는
-        # DynamicTaskRunner가 이미 만들어주는 task_result["message"](각
-        # task 노드의 질문/안내 문구)를 그대로 최종 답변으로 쓴다.
-        direct_message = _build_service_selection_message(task_result) or (task_result.get("message") or "").strip()
-        if not direct_message:
-            direct_message = "요청하신 내용을 처리하지 못했습니다. 다시 한 번 말씀해 주시겠어요?"
-
-        writer({"type": "ai_response_delta", "delta": direct_message})
-
-        # task_status가 waiting_user_input이면 다음 사용자 메시지도 이
-        # 예약을 이어가야 한다 - checkpointer가 영속화하는 active_task/
-        # task_step을 계속 켜둔다. 그래야 다음 턴에 LLM이 (혹시 run_task를
-        # 다시 호출하지 않더라도) 시스템 프롬프트의 [현재 요청 상태]를 통해
-        # "진행 중인 Task가 있다"는 것을 인지한다. completed/failed면 이
-        # 턴에서 태스크가 끝난 것이므로 초기화한다.
-        task_status = task_result.get("status")
-        still_active = task_status == "waiting_user_input"
-
-        return {
-            "intent": intent,
-            "next_action": next_action,
-            "task_type": tool_args.get("task_type", "none"),
-            "use_knowledge": False,
-            "should_use_knowledge": False,
-            "should_end_session": False,
-            "active_task": "reservation" if still_active else None,
-            "task_step": task_result.get("current_node_key") if still_active else None,
-            "task_result": task_result,
-            "task_status": task_status,
-            "final_response": direct_message,
-            "rules": rules,
-            "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-            "messages": [{"role": "assistant", "content": direct_message}],
-        }
+        return await _execute_run_task_turn(
+            organization_id=organization_id,
+            session_id=session_id,
+            user_message=user_message,
+            task_type=tool_args.get("task_type", "reservation_create"),
+            writer=writer,
+            rules=rules,
+        )
     # tool_name == "request_handoff"
-    return {
-        "intent": "handoff",
-        "next_action": "handoff",
-        "task_type": "none",
-        "use_knowledge": False,
-        "should_use_knowledge": False,
-        "should_end_session": False,
-        "final_response": None,
-        "rules": rules,
-        "applied_rules": [rule.get("name", "unnamed_rule") for rule in rules],
-    }
-
-
-async def get_active_rules_async(organization_id: str) -> list[dict]:
-    return await asyncio.to_thread(get_active_rules, organization_id)
+    return _build_handoff_state(rules=rules)

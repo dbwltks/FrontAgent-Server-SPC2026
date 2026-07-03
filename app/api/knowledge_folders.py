@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.rag.retriever import clear_semantic_cache
 from app.repositories.knowledge_folder_repo import (
     create_knowledge_folder,
     list_knowledge_folders,
@@ -38,17 +39,17 @@ class KnowledgeFolderCreateRequest(BaseModel):
         default=None,
         example="자주 묻는 질문 모음",
     )
+    parent_id: str | None = Field(
+        default=None,
+        example=None,
+    )
 
 
 class KnowledgeFolderUpdateRequest(BaseModel):
-    name: str | None = Field(
-        default=None,
-        example="가격/서비스",
-    )
-    description: str | None = Field(
-        default=None,
-        example="서비스 가격표와 상품 설명",
-    )
+    name: str | None = Field(default=None, example="가격/서비스")
+    description: str | None = Field(default=None, example="서비스 가격표와 상품 설명")
+    parent_id: str | None = Field(default=None, example=None)
+    is_active: bool | None = Field(default=None, example=True)
 
 
 @router.post("")
@@ -104,10 +105,13 @@ def update_knowledge_folder_api(
 ):
     raw_data = model_to_dict(req)
 
+    # parent_id/is_active는 명시적으로 전달된 경우에만 업데이트
+    fields_set = req.model_fields_set if hasattr(req, "model_fields_set") else set(raw_data.keys())
+    nullable_fields = {"parent_id"}  # null로 명시 업데이트 가능한 필드
     update_data = {
         key: value
         for key, value in raw_data.items()
-        if value is not None
+        if key in fields_set and (value is not None or key in nullable_fields)
     }
 
     if not update_data:
@@ -127,6 +131,9 @@ def update_knowledge_folder_api(
             status_code=404,
             detail="Knowledge folder not found",
         )
+
+    if "is_active" in update_data:
+        clear_semantic_cache(organization_id)
 
     return updated
 

@@ -1,6 +1,7 @@
 import logging
 import threading
 
+from app.graph.nodes.conversation_node import ensure_conversation_for_session
 from app.graph.state import AgentState
 from app.repositories.agent_run_repo import create_agent_run
 from app.repositories.conversation_repo import (
@@ -10,6 +11,7 @@ from app.repositories.conversation_repo import (
     update_conversation_last_message,
 )
 from app.repositories.knowledge_repo import increment_reference_counts
+from app.repositories.rule_repo import get_active_rules
 
 
 logger = logging.getLogger(__name__)
@@ -17,17 +19,22 @@ logger = logging.getLogger(__name__)
 VOICE_CHANNELS = frozenset({"web_call", "voice"})
 
 
-def _save_ai_message(state: AgentState) -> None:
+def _save_ai_message(
+    state: AgentState,
+    *,
+    conversation_id: str | None = None,
+    applied_rules: list[str] | None = None,
+) -> None:
     organization_id = state["organization_id"]
-    conversation_id = state.get("conversation_id")
+    resolved_conversation_id = conversation_id or state.get("conversation_id")
     final_response = state.get("final_response")
 
-    if not conversation_id or not final_response:
+    if not resolved_conversation_id or not final_response:
         return
 
     metadata = {
         "intent": state.get("intent"),
-        "applied_rules": state.get("applied_rules", []),
+        "applied_rules": applied_rules if applied_rules is not None else state.get("applied_rules", []),
         "used_knowledge": state.get("used_knowledge", []),
     }
 
@@ -44,7 +51,7 @@ def _save_ai_message(state: AgentState) -> None:
 
     saved_message = create_conversation_message(
         organization_id=organization_id,
-        conversation_id=conversation_id,
+        conversation_id=resolved_conversation_id,
         sender_type="ai",
         sender_name="Front Agent",
         message=final_response,
@@ -55,6 +62,44 @@ def _save_ai_message(state: AgentState) -> None:
         logger.warning(
             "Failed to save AI message: organization_id=%s, conversation_id=%s",
             organization_id,
+            resolved_conversation_id,
+        )
+        return
+
+    try:
+        update_conversation_last_message(
+            organization_id=organization_id,
+            conversation_id=resolved_conversation_id,
+            last_message=final_response,
+        )
+    except Exception:
+        logger.warning("Failed to update AI last_message", exc_info=True)
+
+
+def _save_customer_message(state: AgentState, *, conversation_id: str) -> None:
+    organization_id = state["organization_id"]
+    session_id = state["session_id"]
+    user_message = state["user_message"]
+    log_message = (state.get("log_message") or user_message).strip()
+    channel = state.get("channel", "web_chat")
+
+    saved_message = create_conversation_message(
+        organization_id=organization_id,
+        conversation_id=conversation_id,
+        sender_type="customer",
+        sender_name="Customer",
+        message=log_message,
+        metadata={
+            "session_id": session_id,
+            "channel": channel,
+            "agent_message": user_message if user_message != log_message else None,
+        },
+    )
+
+    if saved_message is None:
+        logger.warning(
+            "Failed to save customer message: organization_id=%s, conversation_id=%s",
+            organization_id,
             conversation_id,
         )
         return
@@ -63,19 +108,46 @@ def _save_ai_message(state: AgentState) -> None:
         update_conversation_last_message(
             organization_id=organization_id,
             conversation_id=conversation_id,
-            last_message=final_response,
+            last_message=log_message,
         )
     except Exception:
-        logger.warning("Failed to update AI last_message", exc_info=True)
+        logger.warning("Failed to update customer last_message", exc_info=True)
 
 
-def _end_session_if_requested(state: AgentState) -> None:
+def _persist_turn(state: AgentState) -> None:
+    organization_id = state["organization_id"]
+    session_id = state["session_id"]
+    channel = state.get("channel", "web_chat")
+
+    applied_rules = state.get("applied_rules")
+    if not applied_rules:
+        applied_rules = [rule.get("name", "unnamed_rule") for rule in get_active_rules(organization_id)]
+
+    conversation = ensure_conversation_for_session(
+        organization_id=organization_id,
+        session_id=session_id,
+        channel=channel,
+    )
+    conversation_id = conversation["id"]
+
+    _save_customer_message(state, conversation_id=conversation_id)
+    _save_ai_message(
+        state,
+        conversation_id=conversation_id,
+        applied_rules=applied_rules,
+    )
+    _end_session_if_requested(state, conversation_id=conversation_id)
+    _save_agent_run(state, applied_rules=applied_rules)
+    _increment_knowledge_references(state)
+
+
+def _end_session_if_requested(state: AgentState, *, conversation_id: str | None = None) -> None:
     if not state.get("should_end_session"):
         return
 
     organization_id = state["organization_id"]
     session_id = state["session_id"]
-    conversation_id = state.get("conversation_id")
+    resolved_conversation_id = conversation_id or state.get("conversation_id")
     channel = state.get("channel", "web_chat")
 
     try:
@@ -84,29 +156,29 @@ def _end_session_if_requested(state: AgentState) -> None:
                 organization_id=organization_id,
                 session_id=session_id,
             )
-        elif conversation_id:
+        elif resolved_conversation_id:
             close_conversation(
                 organization_id=organization_id,
-                conversation_id=conversation_id,
+                conversation_id=resolved_conversation_id,
             )
     except Exception:
         logger.warning(
             "end_session handling failed: organization_id=%s session_id=%s conversation_id=%s channel=%s",
             organization_id,
             session_id,
-            conversation_id,
+            resolved_conversation_id,
             channel,
             exc_info=True,
         )
 
 
-def _save_agent_run(state: AgentState) -> None:
+def _save_agent_run(state: AgentState, *, applied_rules: list[str] | None = None) -> None:
     payload = {
         "organization_id": state["organization_id"],
         "session_id": state["session_id"],
         "user_message": state["user_message"],
         "intent": state.get("intent"),
-        "applied_rules": state.get("applied_rules", []),
+        "applied_rules": applied_rules if applied_rules is not None else state.get("applied_rules", []),
         "used_knowledge": state.get("used_knowledge", []),
         "final_response": state.get("final_response"),
         "status": "success",
@@ -143,27 +215,8 @@ def _increment_knowledge_references(state: AgentState) -> None:
         )
 
 
-def finalize_node(state: AgentState) -> AgentState:
-    """
-    response_node 이후 마무리 작업(AI 메시지 저장, 세션 종료 처리, agent run 로그
-    저장)을 한 노드로 합친다.
+def schedule_turn_persistence(state: AgentState) -> None:
+    """응답 반환 이후 백그라운드에서 규칙 조회·DB 저장을 실행한다."""
+    snapshot = dict(state)
 
-    기존에는 save_ai_message_node -> end_session_node -> save_agent_run_node로
-    3개 노드를 거쳤는데, 각 노드 전환마다 LangGraph checkpointer가 Postgres에
-    super-step을 write한다. 세 노드의 실제 작업은 이미 백그라운드 스레드라
-    노드 본문 자체는 즉시 끝나므로, 노드를 합쳐 super-step(checkpoint write)
-    횟수만 줄인다 — 로직은 그대로 재사용.
-
-    end_session 처리는 메시지 저장과 달리 동기적으로 끝내야 할 이유가 없는
-    백그라운드성 후처리이므로 같은 스레드에서 순서대로 묶어 실행한다.
-    """
-
-    def _run_finalize_tasks():
-        _save_ai_message(state)
-        _end_session_if_requested(state)
-        _save_agent_run(state)
-        _increment_knowledge_references(state)
-
-    threading.Thread(target=_run_finalize_tasks, daemon=True).start()
-
-    return state
+    threading.Thread(target=_persist_turn, args=(snapshot,), daemon=True).start()

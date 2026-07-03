@@ -1,5 +1,6 @@
 .env
 .mcp.json
+.cursor/
 .venv
 .agent
 __pycache__/
