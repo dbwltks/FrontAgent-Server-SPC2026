@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for, graph_execution_kwargs
+from app.graph.task_context import hydrate_task_result_for_response
 from app.repositories.organization_repo import resolve_organization_id
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
@@ -194,7 +195,11 @@ async def stream_chat_response(req: ChatRequest):
                 "decision_reason": final_state.get("decision_reason"),
                 "conversation_id": final_state.get("conversation_id"),
                 "task_status": final_state.get("task_status"),
-                "task_result": final_state.get("task_result"),
+                "task_result": hydrate_task_result_for_response(
+                    final_state.get("task_result"),
+                    req.organization_id,
+                    req.session_id,
+                ),
 
                 # 기존 호환용:
                 # 프론트가 아직 message만 읽고 있어도 지식 답변은 정상 표시됨
@@ -270,6 +275,7 @@ async def chat(req: ChatRequest):
                 channel=req.channel,
             ),
             config=graph_config_for(req.organization_id, req.session_id),
+            **graph_execution_kwargs(),
         )
 
         answer_message = result.get("final_response") or AI_DISABLED_MESSAGE
@@ -295,7 +301,11 @@ async def chat(req: ChatRequest):
 
             # task 결과
             task_status=result.get("task_status"),
-            task_result=result.get("task_result"),
+            task_result=hydrate_task_result_for_response(
+                result.get("task_result"),
+                req.organization_id,
+                req.session_id,
+            ),
 
             # 기존 호환용 최종 응답
             message=answer_message,

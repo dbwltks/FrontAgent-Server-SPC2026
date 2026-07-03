@@ -2,11 +2,14 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import ChannelVersions, Checkpoint, CheckpointMetadata, CheckpointTuple
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.core.config import settings
+from app.graph.checkpoint_state import slim_channel_values_for_checkpoint
 from app.graph.graph import build_graph
 from app.repositories.conversation_repo import close_idle_calls, warn_or_close_idle_chats
 
@@ -18,6 +21,76 @@ agent_graph = None
 
 _IDLE_SWEEP_INTERVAL_SECONDS = 10
 _IDLE_CALL_MINUTES = 1
+
+_CHECKPOINT_TUPLE_CACHE_MAX = 2048
+
+
+class CachedAsyncPostgresSaver(AsyncPostgresSaver):
+    """
+    동일 워커에서 연속 턴이 이어질 때 Postgres checkpoint READ를 생략한다.
+    aput 직후 최신 tuple을 캐시해 다음 aget_tuple에서 사용한다.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._tuple_cache: dict[tuple[str, str], CheckpointTuple | None] = {}
+
+    @staticmethod
+    def _cache_key(config: RunnableConfig) -> tuple[str, str]:
+        configurable = config.get("configurable") or {}
+        return (
+            str(configurable.get("thread_id") or ""),
+            str(configurable.get("checkpoint_ns") or ""),
+        )
+
+    def _remember_tuple(self, key: tuple[str, str], checkpoint_tuple: CheckpointTuple | None) -> None:
+        if not key[0]:
+            return
+        if len(self._tuple_cache) >= _CHECKPOINT_TUPLE_CACHE_MAX:
+            self._tuple_cache.pop(next(iter(self._tuple_cache)))
+        self._tuple_cache[key] = checkpoint_tuple
+
+    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        key = self._cache_key(config)
+        if key in self._tuple_cache:
+            return self._tuple_cache[key]
+
+        checkpoint_tuple = await super().aget_tuple(config)
+        self._remember_tuple(key, checkpoint_tuple)
+        return checkpoint_tuple
+
+    async def aput(
+        self,
+        config: RunnableConfig,
+        checkpoint: Checkpoint,
+        metadata: CheckpointMetadata,
+        new_versions: ChannelVersions,
+    ) -> RunnableConfig:
+        channel_values = checkpoint.get("channel_values")
+        if isinstance(channel_values, dict):
+            checkpoint = {
+                **checkpoint,
+                "channel_values": slim_channel_values_for_checkpoint(channel_values),
+            }
+
+        next_config = await super().aput(config, checkpoint, metadata, new_versions)
+        key = self._cache_key(config)
+        self._remember_tuple(
+            key,
+            CheckpointTuple(
+                config=next_config,
+                checkpoint=checkpoint,
+                metadata=metadata,
+                pending_writes=[],
+            ),
+        )
+        return next_config
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        await super().adelete_thread(thread_id)
+        stale_keys = [key for key in self._tuple_cache if key[0] == thread_id]
+        for key in stale_keys:
+            self._tuple_cache.pop(key, None)
 
 
 async def _warm_up_llm_clients() -> None:
@@ -125,7 +198,7 @@ async def lifespan_graph(_app=None):
     )
     await _connection_pool.open()
 
-    checkpointer = AsyncPostgresSaver(conn=_connection_pool)
+    checkpointer = CachedAsyncPostgresSaver(conn=_connection_pool)
     await checkpointer.setup()
 
     agent_graph = build_graph(checkpointer=checkpointer)
@@ -194,7 +267,8 @@ def build_initial_state(
         "use_knowledge": False,
         "decision_reason": None,
         "should_end_session": False,
-        "task_result": None,
+        # task_result/active_task/task_step은 checkpointer가 이전 턴 값을
+        # 유지한다. task memory(variables)는 task_sessions(Redis/DB)만 source of truth.
 
         # 기존 should_use_knowledge_node와의 호환용
         "should_use_knowledge": False,
@@ -222,3 +296,13 @@ def graph_config_for(organization_id: str, session_id: str) -> dict:
             "thread_id": thread_id_for(organization_id, session_id),
         }
     }
+
+
+# super-step마다 checkpoint write하지 않고 그래프 종료 시 1회만 저장한다.
+# 채팅/음성 상담은 중간 크래시 복구보다 응답 지연이 더 중요하다.
+GRAPH_DURABILITY = "exit"
+
+
+def graph_execution_kwargs() -> dict:
+    """ainvoke/astream 공통 durability 옵션."""
+    return {"durability": GRAPH_DURABILITY}

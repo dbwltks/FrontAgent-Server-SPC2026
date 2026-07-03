@@ -6,7 +6,7 @@ import time
 from fastapi import HTTPException
 
 from app.core.config import settings
-from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for, graph_execution_kwargs
 from app.repositories.ai_usage_repo import create_usage_log_background
 from app.services.agent_stream import (
     AGENT_ERROR_MESSAGE,
@@ -65,6 +65,7 @@ async def run_voice_agent_turn(
             channel="web_call",
         ),
         config=graph_config_for(organization_id, session_id),
+        **graph_execution_kwargs(),
     )
 
 

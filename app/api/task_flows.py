@@ -6,7 +6,14 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from app.core.config import settings
-from app.tasks.repository import invalidate_enabled_flow_cache
+from app.tasks.flow_generator import (
+    AVAILABLE_TEMPLATES,
+    generate_task_flow_from_brief,
+    generate_task_flow_from_template,
+    generate_task_flows_from_templates,
+    load_task_flow_template,
+)
+from app.tasks.repository import invalidate_enabled_flow_cache, invalidate_flow_meta_cache
 from app.tasks.runner import DynamicTaskRunner
 
 
@@ -199,6 +206,154 @@ class TaskFlowTestRequest(BaseModel):
     organization_id: str = Field(..., example="00000000-0000-0000-0000-000000000000")
     session_id: str = Field(..., example="task_test_001")
     message: str = Field(..., example="예약 시작")
+
+
+class TaskFlowGenerateRequest(BaseModel):
+    organization_id: str = Field(..., example="00000000-0000-0000-0000-000000000000")
+    template: str = Field(
+        ...,
+        example="all",
+        description=(
+            "reservation_create / reservation_lookup / reservation_cancel / all 중 하나. "
+            "org에 표준 예약 태스크 플로우를 자동 생성한다."
+        ),
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="True면 같은 trigger_intent 플로우를 삭제 후 재생성한다.",
+    )
+    is_enabled: bool = True
+    trigger_description: str | None = Field(
+        default=None,
+        description="template=all일 때는 무시. 단일 template 생성 시 트리거 설명 override.",
+    )
+    trigger_examples: list[str] | None = Field(
+        default=None,
+        description="template=all일 때는 무시. 단일 template 생성 시 트리거 예시 override.",
+    )
+
+
+class TaskFlowGenerateFromBriefRequest(BaseModel):
+    organization_id: str = Field(..., example="00000000-0000-0000-0000-000000000000")
+    brief: str = Field(
+        ...,
+        example=(
+            "고객이 청소 예약을 원하면 서비스, 날짜, 시간, 연락처, 성함을 받아서 "
+            "예약 접수해줘. 인원수는 묻지 마."
+        ),
+    )
+    overwrite: bool = False
+    is_enabled: bool = True
+
+
+@router.get("/templates")
+def list_task_flow_templates():
+    items = []
+    for key in AVAILABLE_TEMPLATES:
+        template = load_task_flow_template(key)
+        flow = template.get("flow") or {}
+        items.append(
+            {
+                "template_key": key,
+                "name": flow.get("name"),
+                "description": flow.get("description"),
+                "trigger_intent": flow.get("trigger_intent"),
+                "trigger_description": flow.get("trigger_description"),
+                "trigger_examples": flow.get("trigger_examples") or [],
+                "node_count": len(template.get("nodes") or []),
+                "edge_count": len(template.get("edges") or []),
+            }
+        )
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/generate")
+def generate_task_flows(request: TaskFlowGenerateRequest):
+    template = request.template.strip()
+    allowed = set(AVAILABLE_TEMPLATES) | {"all"}
+    if template not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid template. Allowed: {', '.join(sorted(allowed))}",
+        )
+
+    if template == "all" and (
+        request.trigger_description is not None or request.trigger_examples is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="trigger_description/trigger_examples override는 단일 template 생성 시에만 사용할 수 있습니다.",
+        )
+
+    client = get_supabase_client()
+
+    try:
+        if template == "all":
+            results = generate_task_flows_from_templates(
+                client,
+                organization_id=request.organization_id,
+                template="all",
+                overwrite=request.overwrite,
+                is_enabled=request.is_enabled,
+            )
+        else:
+            results = [
+                generate_task_flow_from_template(
+                    client,
+                    organization_id=request.organization_id,
+                    template_key=template,
+                    overwrite=request.overwrite,
+                    is_enabled=request.is_enabled,
+                    trigger_description=request.trigger_description,
+                    trigger_examples=request.trigger_examples,
+                )
+            ]
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+    created_count = sum(1 for item in results if item.created)
+    skipped_count = sum(1 for item in results if item.skipped)
+
+    return {
+        "organization_id": request.organization_id,
+        "template": template,
+        "created_count": created_count,
+        "skipped_count": skipped_count,
+        "items": [asdict(item) for item in results],
+    }
+
+
+@router.post("/generate-from-brief")
+async def generate_task_flow_from_brief_api(request: TaskFlowGenerateFromBriefRequest):
+    brief = request.brief.strip()
+    if not brief:
+        raise HTTPException(status_code=400, detail="brief is required")
+
+    client = get_supabase_client()
+    try:
+        plan, result = await generate_task_flow_from_brief(
+            client,
+            organization_id=request.organization_id,
+            brief=brief,
+            overwrite=request.overwrite,
+            is_enabled=request.is_enabled,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+    return {
+        "organization_id": request.organization_id,
+        "plan": plan.model_dump(),
+        "result": asdict(result),
+    }
 
 
 @router.post("")
@@ -441,6 +596,12 @@ def update_task_node(
             detail="No fields to update.",
         )
 
+    if "config" in payload and isinstance(payload["config"], dict):
+        existing = ensure_task_node_exists(client=client, flow_id=flow_id, node_id=node_id)
+        merged_config = dict(existing.get("config") or {})
+        merged_config.update(payload["config"])
+        payload["config"] = merged_config
+
     response = (
         client.table("task_nodes")
         .update(payload)
@@ -457,6 +618,7 @@ def update_task_node(
             detail="Task node not found.",
         )
 
+    invalidate_flow_meta_cache(flow_id)
     return rows[0]
 
 

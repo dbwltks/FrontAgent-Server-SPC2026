@@ -21,6 +21,7 @@ ACTIVE_TASK_STATUSES = [
 # 해당 organization 전체를 무효화한다.
 _ENABLED_FLOW_CACHE_TTL_SECONDS = 60
 _enabled_flow_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+_enabled_flows_list_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
 # Redis 캐시 TTL
 _FLOW_META_TTL = 300        # 노드/엣지 메타데이터: 5분 (관리자 수정 후 최대 5분 지연)
@@ -40,9 +41,17 @@ def _rkey_session(organization_id: str, session_id: str) -> str:
     return f"task:session:{organization_id}:{session_id}"
 
 
+def invalidate_flow_meta_cache(flow_id: str) -> None:
+    pattern = f"task:*:{flow_id}:*"
+    keys = redis_client.keys(pattern)
+    if keys:
+        redis_client.delete(*keys)
+
+
 def invalidate_enabled_flow_cache(organization_id: str) -> None:
     for key in [key for key in _enabled_flow_cache if key[0] == organization_id]:
         _enabled_flow_cache.pop(key, None)
+    _enabled_flows_list_cache.pop(organization_id, None)
 
 
 class TaskRepository:
@@ -123,6 +132,26 @@ class TaskRepository:
 
         return fallback_rows[0] if fallback_rows else None
 
+    def list_enabled_flows(self, organization_id: str) -> list[dict[str, Any]]:
+        cached = _enabled_flows_list_cache.get(organization_id)
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _ENABLED_FLOW_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        response = (
+            self.client.table("task_flows")
+            .select(
+                "id, name, trigger_intent, trigger_description, trigger_examples, "
+                "allowed_channels, is_enabled, created_at"
+            )
+            .eq("organization_id", organization_id)
+            .eq("is_enabled", True)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        flows = response.data or []
+        _enabled_flows_list_cache[organization_id] = (now, flows)
+        return flows
 
 
     def find_active_session(

@@ -1,7 +1,8 @@
 import time
 from typing import AsyncIterator, Callable, Awaitable
 
-from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for
+from app.graph.graph_runtime import build_initial_state, get_agent_graph, graph_config_for, graph_execution_kwargs
+from app.graph.task_context import hydrate_task_result_for_response
 from app.services.agent_stream import (
     AI_DISABLED_MESSAGE,
     elapsed_ms_since,
@@ -37,7 +38,11 @@ async def run_agent_turn(
         log_message=log_message,
     )
     config = graph_config_for(organization_id, session_id)
-    return await agent_graph.ainvoke(initial_state, config=config)
+    return await agent_graph.ainvoke(
+        initial_state,
+        config=config,
+        **graph_execution_kwargs(),
+    )
 
 
 async def stream_agent_turn(
@@ -97,7 +102,11 @@ async def stream_agent_turn(
         "next_action": final_state.get("next_action"),
         "task_type": final_state.get("task_type"),
         "task_status": final_state.get("task_status"),
-        "task_result": final_state.get("task_result"),
+        "task_result": hydrate_task_result_for_response(
+            final_state.get("task_result"),
+            organization_id,
+            session_id,
+        ),
         "use_knowledge": final_state.get("use_knowledge", False),
         "decision_reason": final_state.get("decision_reason"),
         "applied_rules": final_state.get("applied_rules", []),

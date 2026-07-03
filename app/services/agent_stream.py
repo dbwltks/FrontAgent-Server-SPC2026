@@ -2,6 +2,8 @@ import json
 import time
 from typing import Any, AsyncIterator, Awaitable, Callable
 
+from app.graph.graph_runtime import graph_execution_kwargs
+
 AI_DISABLED_MESSAGE = "AI 자동응답이 꺼져 있어 관리자 응답을 기다립니다."
 AGENT_ERROR_MESSAGE = "Agent response failed"
 
@@ -12,7 +14,6 @@ NODE_TRACE_LABELS = {
     "task": "태스크 실행 완료",
     "knowledge": "지식 검색 완료",
     "response": "응답 생성 완료",
-    "finalize": "마무리 처리 완료",
 }
 
 
@@ -129,6 +130,7 @@ async def stream_agent_graph_events(
         initial_state,
         config=config,
         stream_mode=["custom", "updates"],
+        **graph_execution_kwargs(),
     ):
         if mode == "custom":
             chunk_type = chunk.get("type")

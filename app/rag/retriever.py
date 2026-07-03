@@ -10,7 +10,8 @@ import threading
 
 from app.core.db import supabase
 from app.providers.embedding_provider import create_embedding
-from app.rag.indexer import extract_keywords
+from app.rag.indexer import extract_keywords, prepare_keywords_for_hybrid_rpc
+from app.rag.keyword_vocabulary import get_organization_keyword_vocabulary
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,13 @@ logger = logging.getLogger(__name__)
 # threshold 필터링 후에도 match_count개를 채울 수 있도록 여유분을 더 가져온다.
 OVERFETCH_MULTIPLIER = 4
 
-SIMILARITY_THRESHOLD = 0.25
+# hybrid RPC combined score(0.7 vector + 0.3 keyword) 기준. 실측상 무관 chunk가
+# 0.25~0.27대에 몰려 있어 0.30이 precision/recall 균형이 좋다.
+HYBRID_SIMILARITY_THRESHOLD = 0.30
+# 키워드 보정 없는 vector-only 검색은 더 보수적으로.
+VECTOR_SIMILARITY_THRESHOLD = 0.35
+# hybrid 결과는 content lexical evidence도 함께 요구한다.
+MIN_KEYWORD_HITS_FOR_HYBRID = 2
 
 # "영업시간이 언제예요?"와 "몇 시까지 하나요?"처럼 표현이 달라도 같은 의미면
 # RAG 검색(임베딩 API 호출은 이미 했으니, 이후의 Supabase RPC)을 건너뛰기 위한
@@ -30,10 +37,45 @@ SIMILARITY_THRESHOLD = 0.25
 SEMANTIC_CACHE_THRESHOLD = 0.93
 
 
+def _keyword_hits_in_content(content: str, query_keywords: list[str]) -> int:
+    lowered = content.lower()
+    return sum(1 for keyword in query_keywords if len(keyword) >= 2 and keyword.lower() in lowered)
+
+
+def _required_keyword_hits(query_keywords: list[str]) -> int:
+    if not query_keywords:
+        return 0
+    return min(MIN_KEYWORD_HITS_FOR_HYBRID, len(query_keywords))
+
+
+def _passes_retrieval_threshold(
+    row: dict,
+    query_keywords: list[str],
+    *,
+    used_hybrid: bool,
+) -> bool:
+    similarity = row.get("similarity", 0)
+    if used_hybrid:
+        if similarity < HYBRID_SIMILARITY_THRESHOLD:
+            return False
+        content = row.get("content") or ""
+        return _keyword_hits_in_content(content, query_keywords) >= _required_keyword_hits(query_keywords)
+
+    return similarity >= VECTOR_SIMILARITY_THRESHOLD
+
+
+def clear_semantic_cache(organization_id: str, folder_id: str | None = None) -> None:
+    query = supabase.table("knowledge_semantic_cache").delete().eq("organization_id", organization_id)
+    if folder_id:
+        query = query.eq("folder_id", folder_id)
+    query.execute()
+
+
 async def _lookup_semantic_cache(
     organization_id: str,
     query_embedding: list[float],
     folder_id: str | None,
+    query_keywords: list[str] | None = None,
 ) -> list[dict] | None:
     try:
         result = await asyncio.to_thread(
@@ -64,6 +106,16 @@ async def _lookup_semantic_cache(
     # 빈 결과를 hit로 반환하면 이후 실제 지식이 추가되어도 RPC 검색을 건너뛸 수 있다.
     if not cached_result:
         return None
+
+    # 지식/검색 로직이 바뀐 뒤에도 예전 오답 캐시가 남아 있을 수 있다.
+    # query keyword와 전혀 맞지 않는 cached chunk면 miss로 처리한다.
+    if query_keywords:
+        top_chunk = cached_result[0]
+        content = top_chunk.get("content") or ""
+        if _keyword_hits_in_content(content, query_keywords) < _required_keyword_hits(query_keywords):
+            return None
+        if top_chunk.get("similarity", 0) < HYBRID_SIMILARITY_THRESHOLD:
+            return None
 
     return cached_result
 
@@ -106,17 +158,27 @@ async def retrieve_knowledge(
 ) -> list[dict]:
     # 임베딩 + 키워드를 병렬로 추출
     query_embedding = await create_embedding(query)
-    query_keywords = extract_keywords(query, max_keywords=10)
+    vocabulary = get_organization_keyword_vocabulary(organization_id)
+    query_keywords = extract_keywords(query, max_keywords=10, vocabulary=vocabulary)
 
-    cached_result = await _lookup_semantic_cache(organization_id, query_embedding, folder_id)
+    cached_result = await _lookup_semantic_cache(
+        organization_id, query_embedding, folder_id, query_keywords
+    )
     if cached_result is not None:
-        return cached_result[:match_count]
+        used_hybrid = bool(query_keywords)
+        filtered_cache = [
+            row
+            for row in cached_result
+            if _passes_retrieval_threshold(row, query_keywords, used_hybrid=used_hybrid)
+        ]
+        if filtered_cache:
+            return filtered_cache[:match_count]
 
     # 하이브리드 검색: 키워드가 있으면 hybrid RPC, 없으면 기존 vector RPC
     if query_keywords:
         rpc_params = {
             "query_embedding": query_embedding,
-            "query_keywords": query_keywords,
+            "query_keywords": prepare_keywords_for_hybrid_rpc(query_keywords),
             "match_organization_id": organization_id,
             "match_count": match_count * OVERFETCH_MULTIPLIER,
             "match_folder_id": folder_id,
@@ -136,11 +198,12 @@ async def retrieve_knowledge(
         )
 
     rows = result.data or []
+    used_hybrid = bool(query_keywords)
 
     filtered_rows = [
         row
         for row in rows
-        if row.get("similarity", 0) >= SIMILARITY_THRESHOLD
+        if _passes_retrieval_threshold(row, query_keywords, used_hybrid=used_hybrid)
     ]
 
     final_rows = filtered_rows[:match_count]
