@@ -1,77 +1,139 @@
+"""
+파일/URL에서 텍스트를 추출한다.
+
+라이브러리:
+- markitdown (Microsoft, MIT): PDF/Word/Excel/PPT/HTML 등 구조화 문서를
+  마크다운으로 변환. 테이블·레이아웃 보존 우수.
+  https://github.com/microsoft/markitdown
+- pandas: CSV 파싱 및 서비스 카탈로그 자연어 변환
+- trafilatura: 웹 페이지 본문 추출 (메뉴·광고·푸터 제거)
+- httpx: URL 다운로드
+
+파일 형식별 전략:
+- CSV: 서비스 카탈로그 패턴이면 서비스별 자연어로 변환, 일반 표는 마크다운 테이블
+- PDF/DOCX/PPTX/XLSX 등: markitdown으로 마크다운 변환
+- TXT/MD: 원문 그대로
+"""
+
 from pathlib import Path
-import pandas as pd
-from pypdf import PdfReader
+
 import httpx
+import pandas as pd
 import trafilatura
+from markitdown import MarkItDown
 
-def extract_pdf_text(file_path: str) -> str:
-    reader = PdfReader(file_path)
-    text = ""
+_md = MarkItDown()
 
-    for page in reader.pages:
-        text += page.extract_text() or ""
-        text += "\n"
+# ── CSV 전용 서비스 카탈로그 변환 ─────────────────────────────────────────────
 
-    return text.strip()
+_SERVICE_CATALOG_COLS = {"item_name", "service_name", "base_price", "price"}
 
 
-def extract_txt_text(file_path: str) -> str:
-    with open(file_path, "r", encoding="utf-8") as file:
-        return file.read().strip()
+def _is_service_catalog(df: pd.DataFrame) -> bool:
+    cols = {c.lower().strip() for c in df.columns}
+    return bool(cols & _SERVICE_CATALOG_COLS)
 
 
-def format_cell_value(value) -> str:
-    if pd.isna(value):
-        return ""
-
-    # 50000.0 → 50000
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-
-    return str(value).strip()
+def _format_num(value: str) -> str:
+    try:
+        return f"{int(float(value)):,}"
+    except (ValueError, TypeError):
+        return value
 
 
-def dataframe_to_searchable_text(df: pd.DataFrame) -> str:
-    """
-    CSV / Excel 같은 표 데이터를 범용 검색 텍스트로 변환한다.
+def _get(row: pd.Series, col_map: dict, *keys: str) -> str:
+    for k in keys:
+        if k in col_map:
+            v = row[col_map[k]]
+            if pd.notna(v) and str(v).strip():
+                return str(v).strip()
+    return ""
 
-    예:
-    service_name, price, duration
-    방문 상담, 100000, 90분
 
-    변환:
-    1번 항목: service_name은/는 방문 상담, price은/는 100000, duration은/는 90분입니다.
-    """
+def _service_catalog_to_text(df: pd.DataFrame) -> str:
+    col = {c.lower().strip(): c for c in df.columns}
+
+    services: dict[str, dict] = {}
+    for _, row in df.iterrows():
+        item = _get(row, col, "item_name", "name")
+        if not item:
+            continue
+        if item not in services:
+            services[item] = {
+                "description": _get(row, col, "item_description", "description"),
+                "base_price": _get(row, col, "base_price", "price"),
+                "duration": _get(row, col, "duration_minutes", "duration"),
+                "options": [],
+            }
+        opt_value = _get(row, col, "option_value")
+        if opt_value:
+            services[item]["options"].append({
+                "value": opt_value,
+                "desc": _get(row, col, "option_description"),
+                "price": _get(row, col, "additional_price"),
+                "duration": _get(row, col, "additional_duration"),
+            })
 
     lines = []
+    for item_name, info in services.items():
+        parts = [f"### 서비스 아이템: {item_name}"]
+        if info["description"]:
+            parts.append(f"설명: {info['description']}")
+        if info["base_price"]:
+            parts.append(f"기본 가격: {_format_num(info['base_price'])}원")
+        if info["duration"]:
+            parts.append(f"소요 시간: {info['duration']}분")
+        if info["options"]:
+            parts.append("옵션:")
+            for opt in info["options"]:
+                line = f"  - {opt['value']}"
+                if opt["desc"]:
+                    line += f": {opt['desc']}"
+                if opt["price"]:
+                    line += f" (+{_format_num(opt['price'])}원)"
+                if opt["duration"]:
+                    line += f" (+{opt['duration']}분)"
+                parts.append(line)
+        lines.append("\n".join(parts))
 
-    for row_index, row in df.iterrows():
-        parts = []
-
-        for column in df.columns:
-            value = format_cell_value(row[column])
-
-            if not value:
-                continue
-
-            column_name = str(column).strip()
-            parts.append(f"{column_name}은/는 {value}")
-
-        if parts:
-            line = f"{row_index + 1}번 항목: " + ", ".join(parts) + "입니다."
-            lines.append(line)
-
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def extract_csv_text(file_path: str) -> str:
-    df = pd.read_csv(file_path)
-    return dataframe_to_searchable_text(df)
+    df = pd.read_csv(file_path, encoding="utf-8-sig")
+    if _is_service_catalog(df):
+        return _service_catalog_to_text(df)
+    # 일반 CSV: 마크다운 테이블
+    result = _md.convert(file_path)
+    return (result.text_content or "").strip()
 
 
-def extract_excel_text(file_path: str) -> str:
-    df = pd.read_excel(file_path)
-    return dataframe_to_searchable_text(df)
+# ── 파일 형식별 추출 ──────────────────────────────────────────────────────────
+
+_MARKITDOWN_SUPPORTED = {
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls",
+    ".pptx", ".ppt", ".html", ".htm", ".md",
+}
+
+
+def extract_text_from_file(file_path: str, file_name: str) -> str:
+    suffix = Path(file_name).suffix.lower()
+
+    if suffix == ".csv":
+        return extract_csv_text(file_path)
+
+    if suffix in {".txt"}:
+        with open(file_path, "r", encoding="utf-8-sig", errors="replace") as f:
+            return f.read().strip()
+
+    if suffix in _MARKITDOWN_SUPPORTED:
+        result = _md.convert(file_path)
+        return (result.text_content or "").strip()
+
+    raise ValueError(f"Unsupported file type: {suffix}")
+
+
+# ── URL 추출 ─────────────────────────────────────────────────────────────────
 
 _HEADERS = {
     "User-Agent": (
@@ -81,28 +143,9 @@ _HEADERS = {
     )
 }
 
+
 def extract_text_from_url(url: str) -> str:
-    """URL을 받아 본문 텍스트만 추출한다. (메뉴·광고·푸터 제거)"""
     response = httpx.get(url, timeout=15, follow_redirects=True, headers=_HEADERS)
     response.raise_for_status()
-
     text = trafilatura.extract(response.text) or ""
     return text.strip()
-
-
-def extract_text_from_file(file_path: str, file_name: str) -> str:
-    suffix = Path(file_name).suffix.lower()
-
-    if suffix == ".pdf":
-        return extract_pdf_text(file_path)
-
-    if suffix in [".txt", ".md"]:
-        return extract_txt_text(file_path)
-
-    if suffix == ".csv":
-        return extract_csv_text(file_path)
-
-    if suffix in [".xlsx", ".xls"]:
-        return extract_excel_text(file_path)
-
-    raise ValueError(f"Unsupported file type: {suffix}")

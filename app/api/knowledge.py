@@ -533,6 +533,95 @@ async def patch_knowledge_source(
     }
 
 
+@router.post("/knowledge/{source_id}/reindex")
+async def reindex_knowledge(
+    source_id: str,
+    organization_id: str,
+):
+    """
+    기존 knowledge source의 원본 파일(Storage)을 다시 추출·임베딩한다.
+    텍스트 소스는 현재 content를 그대로 재인덱싱하고,
+    파일 소스(pdf/csv/txt 등)는 Storage에서 원본을 다운로드해 재처리한다.
+    """
+    from app.repositories.knowledge_repo import delete_knowledge_chunks
+    from app.core.config import settings as app_settings
+
+    source = get_knowledge_source(organization_id=organization_id, source_id=source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Knowledge source not found")
+
+    storage_path = source.get("storage_path")
+    source_type = source.get("source_type", "text")
+    title = source.get("title") or source.get("file_name") or "지식 문서"
+    file_name = source.get("file_name")
+    folder_id = source.get("folder_id")
+
+    await asyncio.to_thread(update_source_status, source_id, "indexing")
+
+    try:
+        if storage_path:
+            # 파일 소스: Storage에서 원본 다운로드 후 텍스트 추출
+            raw = await asyncio.to_thread(
+                lambda: __import__('app.core.db', fromlist=['supabase']).supabase
+                .storage.from_(app_settings.knowledge_storage_bucket)
+                .download(storage_path)
+            )
+            suffix = f".{source_type}" if not source_type.startswith(".") else source_type
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw)
+                tmp_path = tmp.name
+            try:
+                extracted_text = await asyncio.to_thread(
+                    extract_text_from_file,
+                    file_path=tmp_path,
+                    file_name=file_name or title,
+                )
+            finally:
+                os.unlink(tmp_path)
+        else:
+            # 텍스트 소스: DB에 저장된 chunk 내용을 이어붙여 재인덱싱
+            chunks = await asyncio.to_thread(
+                list_knowledge_chunks,
+                organization_id=organization_id,
+                source_id=source_id,
+            )
+            extracted_text = "\n\n".join(c.get("content", "") for c in chunks)
+
+        if not extracted_text.strip():
+            raise HTTPException(status_code=400, detail="재인덱싱할 텍스트가 없습니다.")
+
+        await asyncio.to_thread(
+            delete_knowledge_chunks,
+            organization_id=organization_id,
+            source_id=source_id,
+        )
+
+        result = await asyncio.to_thread(
+            index_text,
+            organization_id=organization_id,
+            title=title,
+            text=extracted_text,
+            folder_id=folder_id,
+            source_type=source_type,
+            file_name=file_name,
+            source_id=source_id,
+        )
+
+        return {
+            "source_id": source_id,
+            "chunks": result.get("chunks", 0),
+            "status": "indexed",
+        }
+
+    except HTTPException:
+        await asyncio.to_thread(update_source_status, source_id, "failed")
+        raise
+    except Exception as e:
+        await asyncio.to_thread(update_source_status, source_id, "failed")
+        logger.exception("reindex failed: source_id=%s", source_id)
+        raise HTTPException(status_code=500, detail=f"재인덱싱 실패: {e}") from e
+
+
 @router.delete("/knowledge/{source_id}")
 def delete_knowledge(
     source_id: str,

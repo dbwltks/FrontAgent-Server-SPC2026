@@ -5,11 +5,12 @@ import threading
 
 # 질문 embedding 생성
 # → semantic cache(의미상 비슷한 과거 질문) 조회, 있으면 RPC 생략
-# → 없으면 Supabase RPC 검색 → 결과를 semantic cache에 저장
-# → 관련 chunk 5개 반환
+# → 없으면 하이브리드 RPC(벡터 + 키워드) 검색 → 결과를 semantic cache에 저장
+# → 관련 chunk 반환
 
 from app.core.db import supabase
 from app.providers.embedding_provider import create_embedding
+from app.rag.indexer import extract_keywords
 
 
 logger = logging.getLogger(__name__)
@@ -103,25 +104,36 @@ async def retrieve_knowledge(
     match_count: int = 5,
     folder_id: str | None = None,
 ) -> list[dict]:
+    # 임베딩 + 키워드를 병렬로 추출
     query_embedding = await create_embedding(query)
+    query_keywords = extract_keywords(query, max_keywords=10)
 
     cached_result = await _lookup_semantic_cache(organization_id, query_embedding, folder_id)
     if cached_result is not None:
         return cached_result[:match_count]
 
-    rpc_params = {
-        "query_embedding": query_embedding,
-        "match_organization_id": organization_id,
-        "match_count": match_count * OVERFETCH_MULTIPLIER,
-        "match_folder_id": folder_id,
-    }
-
-    result = await asyncio.to_thread(
-        lambda: supabase.rpc(
-            "match_knowledge_chunks",
-            rpc_params,
-        ).execute()
-    )
+    # 하이브리드 검색: 키워드가 있으면 hybrid RPC, 없으면 기존 vector RPC
+    if query_keywords:
+        rpc_params = {
+            "query_embedding": query_embedding,
+            "query_keywords": query_keywords,
+            "match_organization_id": organization_id,
+            "match_count": match_count * OVERFETCH_MULTIPLIER,
+            "match_folder_id": folder_id,
+        }
+        result = await asyncio.to_thread(
+            lambda: supabase.rpc("match_knowledge_chunks_hybrid", rpc_params).execute()
+        )
+    else:
+        rpc_params = {
+            "query_embedding": query_embedding,
+            "match_organization_id": organization_id,
+            "match_count": match_count * OVERFETCH_MULTIPLIER,
+            "match_folder_id": folder_id,
+        }
+        result = await asyncio.to_thread(
+            lambda: supabase.rpc("match_knowledge_chunks", rpc_params).execute()
+        )
 
     rows = result.data or []
 
