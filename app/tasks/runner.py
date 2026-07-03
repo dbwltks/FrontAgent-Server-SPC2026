@@ -26,7 +26,8 @@ class DynamicTaskRunner:
         2. 없으면 flow_id가 전달된 경우 해당 flow를 수동 시작
         3. flow_id가 없고 진행 중 session도 없으면 handled=False 반환
 
-        trigger 판단은 아직 연결하지 않는다.
+        trigger 판단은 agent_node에서 task_flows 트리거 매칭으로 수행하고,
+        매칭 시 flow_id를 넘겨 세션을 시작한다.
         """
 
         task_session = self.repository.find_active_session(

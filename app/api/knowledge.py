@@ -7,13 +7,13 @@ from pathlib import Path
 from uuid import uuid4
 import httpx
 
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from app.services.service_sync_pipeline import extract_and_sync_services_from_knowledge
 
 from app.core.config import settings
 from app.rag.indexer import create_knowledge_source, index_text, update_source_status
-from app.rag.text_extractor import extract_text_from_file, extract_text_from_url
+from app.rag.text_extractor import extract_text_from_file, extract_text_from_url, extract_chunks_from_file
 from app.repositories.knowledge_repo import (
     list_knowledge_sources,
     get_knowledge_source,
@@ -153,8 +153,57 @@ async def create_knowledge_from_url(req: KnowledgeUrlRequest):
             detail=KNOWLEDGE_ERROR_MESSAGE,
         )
     
+async def _background_index(
+    temp_file_path: str,
+    original_file_name: str,
+    suffix: str,
+    organization_id: str,
+    folder_id: str | None,
+    source_id: str,
+    storage_path: str,
+    mime_type: str,
+    uploaded_bytes: int,
+):
+    """업로드 완료 후 텍스트 추출 → 인덱싱을 백그라운드에서 실행."""
+    try:
+        await asyncio.to_thread(update_source_status, source_id, "extracting")
+        extracted_text = await asyncio.to_thread(
+            extract_text_from_file,
+            file_path=temp_file_path,
+            file_name=original_file_name,
+        )
+        if not extracted_text.strip():
+            await asyncio.to_thread(update_source_status, source_id, "failed")
+            return
+
+        await asyncio.to_thread(
+            index_text,
+            organization_id=organization_id,
+            title=original_file_name,
+            text=extracted_text,
+            folder_id=folder_id,
+            source_type=suffix.replace(".", ""),
+            file_name=original_file_name,
+            mime_type=mime_type,
+            source_id=source_id,
+        )
+
+        await _maybe_extract_services_from_knowledge(
+            organization_id=organization_id,
+            source_id=source_id,
+            enabled=True,
+        )
+    except Exception:
+        logger.exception("background indexing failed: source_id=%s", source_id)
+        await asyncio.to_thread(update_source_status, source_id, "failed")
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+
+
 @router.post("/knowledge/upload")
 async def upload_knowledge(
+    background_tasks: BackgroundTasks,
     organization_id: str = Form(...),
     folder_id: str | None = Form(None),
     file: UploadFile = File(...),
@@ -167,7 +216,7 @@ async def upload_knowledge(
         original_file_name = file.filename or "uploaded_file"
         suffix = Path(original_file_name).suffix.lower()
 
-        allowed_extensions = [".pdf", ".txt", ".md", ".csv", ".xlsx", ".xls"]
+        allowed_extensions = [".pdf", ".txt", ".md", ".xlsx", ".xls"]
 
         if suffix not in allowed_extensions:
             raise HTTPException(
@@ -245,45 +294,29 @@ async def upload_knowledge(
             storage_path=storage_path,
             content_type=mime_type,
         )
-        await asyncio.to_thread(update_source_status, source_id, "extracting")
 
-        extracted_text = await asyncio.to_thread(
-            extract_text_from_file,
-            file_path=temp_file_path,
-            file_name=original_file_name,
-        )
-
-        if not extracted_text.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="No text could be extracted from this file."
-            )
-
-        result = await asyncio.to_thread(
-            index_text,
+        # Storage 업로드 완료 → 인덱싱은 백그라운드로
+        await asyncio.to_thread(update_source_status, source_id, "processing")
+        background_tasks.add_task(
+            _background_index,
+            temp_file_path=temp_file_path,
+            original_file_name=original_file_name,
+            suffix=suffix,
             organization_id=organization_id,
-            title=original_file_name,
-            text=extracted_text,
             folder_id=folder_id,
-            source_type=suffix.replace(".", ""),
-            file_name=original_file_name,
+            source_id=source_id,
+            storage_path=storage_path,
             mime_type=mime_type,
-            source_id=source_id,
+            uploaded_bytes=uploaded_bytes,
         )
-
-        service_sync = await _maybe_extract_services_from_knowledge(
-            organization_id=organization_id,
-            source_id=source_id,
-            enabled=True,
-        )
+        temp_file_path = None  # 백그라운드에서 정리하므로 finally에서 삭제 안 함
 
         return {
+            "source_id": source_id,
             "file_name": original_file_name,
             "mime_type": mime_type,
             "file_size": uploaded_bytes,
-            "text_length": len(extracted_text),
-            **result,
-            "service_sync": service_sync,
+            "status": "processing",
         }
 
     except HTTPException:
@@ -561,21 +594,23 @@ async def reindex_knowledge(
     try:
         if storage_path:
             # 파일 소스: Storage에서 원본 다운로드 후 텍스트 추출
+            from app.core.db import supabase as _supabase
+            bucket = app_settings.knowledge_storage_bucket
             raw = await asyncio.to_thread(
-                lambda: __import__('app.core.db', fromlist=['supabase']).supabase
-                .storage.from_(app_settings.knowledge_storage_bucket)
-                .download(storage_path)
+                lambda: _supabase.storage.from_(bucket).download(storage_path)
             )
             suffix = f".{source_type}" if not source_type.startswith(".") else source_type
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(raw)
                 tmp_path = tmp.name
             try:
-                extracted_text = await asyncio.to_thread(
-                    extract_text_from_file,
-                    file_path=tmp_path,
-                    file_name=file_name or title,
-                )
+                fname = file_name or title
+                # 행별 데이터(Excel/CSV)는 행당 1 chunk로 저장 — overlap 청킹 불필요
+                pre_chunked = await asyncio.to_thread(extract_chunks_from_file, tmp_path, fname)
+                if pre_chunked is None:
+                    extracted_text = await asyncio.to_thread(extract_text_from_file, tmp_path, fname)
+                else:
+                    extracted_text = None
             finally:
                 os.unlink(tmp_path)
         else:
@@ -587,7 +622,7 @@ async def reindex_knowledge(
             )
             extracted_text = "\n\n".join(c.get("content", "") for c in chunks)
 
-        if not extracted_text.strip():
+        if pre_chunked is None and not (extracted_text or "").strip():
             raise HTTPException(status_code=400, detail="재인덱싱할 텍스트가 없습니다.")
 
         await asyncio.to_thread(
@@ -600,12 +635,19 @@ async def reindex_knowledge(
             index_text,
             organization_id=organization_id,
             title=title,
-            text=extracted_text,
+            text=extracted_text or "",
             folder_id=folder_id,
             source_type=source_type,
             file_name=file_name,
             source_id=source_id,
+            pre_chunked=pre_chunked,
         )
+
+        from app.rag.retriever import clear_semantic_cache
+        from app.rag.keyword_vocabulary import clear_organization_keyword_vocabulary
+
+        await asyncio.to_thread(clear_semantic_cache, organization_id)
+        clear_organization_keyword_vocabulary(organization_id)
 
         return {
             "source_id": source_id,

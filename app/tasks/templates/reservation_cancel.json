@@ -1,0 +1,204 @@
+{
+  "template_key": "reservation_cancel",
+  "flow": {
+    "name": "예약 취소 플로우",
+    "description": "고객 전화번호 기준으로 취소 가능한 예약을 조회하고 선택한 예약을 취소하는 플로우",
+    "trigger_intent": "reservation_cancel",
+    "trigger_description": "고객이 기존 예약 취소를 요청할 때 실행",
+    "trigger_examples": [
+      "예약 취소하고 싶어요",
+      "예약 취소해주세요",
+      "제 예약 취소할게요",
+      "예약을 취소하고 싶습니다"
+    ],
+    "allowed_channels": [
+      "chat",
+      "voice"
+    ],
+    "filters": {},
+    "is_enabled": true
+  },
+  "nodes": [
+    {
+      "node_key": "lookup_cancelable_reservations",
+      "node_type": "function",
+      "label": "취소 가능 예약 조회",
+      "config": {
+        "params": {
+          "limit": 10,
+          "customer_phone": "{{memory.customer_phone}}",
+          "organization_id": "a55c98f9-74ba-40d8-bc9d-bc3f1c0870da"
+        },
+        "save_as": "lookup_result",
+        "action_key": "reservation.lookup_cancelable_reservations",
+        "function_name": "reservation.lookup_cancelable_reservations",
+        "flatten_result": true
+      },
+      "code": null,
+      "position_x": 300,
+      "position_y": 0,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "cancel_reservation",
+      "node_type": "function",
+      "label": "예약 취소 실행",
+      "config": {
+        "params": {
+          "organization_id": "a55c98f9-74ba-40d8-bc9d-bc3f1c0870da",
+          "selected_reservation_number": "{{memory.selected_reservation_number}}"
+        },
+        "save_as": "cancel_result",
+        "action_key": "reservation.cancel_reservation",
+        "function_name": "reservation.cancel_reservation",
+        "flatten_result": true
+      },
+      "code": null,
+      "position_x": 900,
+      "position_y": -100,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "cancel_complete",
+      "node_type": "message",
+      "label": "예약 취소 완료",
+      "config": {
+        "message": "예약이 취소되었습니다.",
+        "next_step_mode": "end"
+      },
+      "code": null,
+      "position_x": 1200,
+      "position_y": -100,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "no_cancelable_end",
+      "node_type": "message",
+      "label": "취소 가능 예약 없음",
+      "config": {
+        "message": "입력하신 전화번호로 취소 가능한 예약을 찾지 못했습니다.",
+        "next_step_mode": "end"
+      },
+      "code": null,
+      "position_x": 600,
+      "position_y": 120,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "cancel_fail_end",
+      "node_type": "message",
+      "label": "예약 취소 실패",
+      "config": {
+        "message": "예약 취소 처리에 실패했습니다. 예약 정보를 다시 확인하거나 상담원에게 문의해주세요.",
+        "next_step_mode": "end"
+      },
+      "code": null,
+      "position_x": 1200,
+      "position_y": 120,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "start",
+      "node_type": "instruction",
+      "label": "전화번호 질문",
+      "config": {
+        "instruction": "[역할]\n고객에게 필요한 정보를 자연스럽게 질문하고 답변에서 값을 추출하는 에이전트다.\n\n[대화 흐름]\n- 예약 취소를 위해 예약하실 때 입력한 전화번호를 알려주세요. 예: 010-1234-5678\n\n[종료 조건]\n- customer_phone 값을 확인하면 종료한다.\n\n[예외 사항]\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.\n\n<promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>",
+        "next_step_mode": "single",
+        "save_to_memory": true
+      },
+      "code": null,
+      "position_x": 0,
+      "position_y": 0,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "ask_cancel_number",
+      "node_type": "instruction",
+      "label": "취소 예약 선택",
+      "config": {
+        "instruction": "[역할]\n고객에게 필요한 정보를 자연스럽게 질문하고 답변에서 값을 추출하는 에이전트다.\n\n[대화 흐름]\n- 취소 가능한 예약을 찾았습니다. 취소할 예약 번호를 입력해주세요. 예: 1번\n\n[종료 조건]\n- selected_reservation_number 값을 확인하면 종료한다.\n\n[예외 사항]\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.\n\n<promptdata type=\"update-variable\" subtype=\"text\" identifier=\"selected_reservation_number\"></promptdata>",
+        "next_step_mode": "single",
+        "save_to_memory": true
+      },
+      "code": null,
+      "position_x": 600,
+      "position_y": -100,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    }
+  ],
+  "edges": [
+    {
+      "source_node_key": "start",
+      "target_node_key": "lookup_cancelable_reservations",
+      "edge_type": "single",
+      "condition_type": "always",
+      "condition_config": {},
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "lookup_cancelable_reservations",
+      "target_node_key": "ask_cancel_number",
+      "edge_type": "condition",
+      "condition_type": "equals",
+      "condition_config": {
+        "value": true,
+        "variable": "memory.has_cancelable_reservations"
+      },
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "ask_cancel_number",
+      "target_node_key": "cancel_reservation",
+      "edge_type": "single",
+      "condition_type": "always",
+      "condition_config": {},
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "cancel_reservation",
+      "target_node_key": "cancel_complete",
+      "edge_type": "condition",
+      "condition_type": "equals",
+      "condition_config": {
+        "value": true,
+        "variable": "memory.cancelled"
+      },
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "lookup_cancelable_reservations",
+      "target_node_key": "no_cancelable_end",
+      "edge_type": "condition",
+      "condition_type": "equals",
+      "condition_config": {
+        "value": false,
+        "variable": "memory.has_cancelable_reservations"
+      },
+      "is_failure_edge": false,
+      "priority": 200
+    },
+    {
+      "source_node_key": "cancel_reservation",
+      "target_node_key": "cancel_fail_end",
+      "edge_type": "condition",
+      "condition_type": "equals",
+      "condition_config": {
+        "value": false,
+        "variable": "memory.cancelled"
+      },
+      "is_failure_edge": false,
+      "priority": 200
+    }
+  ]
+}
