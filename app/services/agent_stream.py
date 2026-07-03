@@ -158,6 +158,21 @@ async def stream_agent_graph_events(
                     "elapsed_ms": elapsed_ms_since(started_at),
                 }
 
+            elif chunk_type == "voice_preamble_start":
+                yield "voice_preamble_start", {"elapsed_ms": elapsed_ms_since(started_at)}
+
+            elif chunk_type == "voice_preamble_token":
+                yield "voice_preamble_token", {
+                    "token": chunk.get("token", ""),
+                    "elapsed_ms": elapsed_ms_since(started_at),
+                }
+
+            elif chunk_type == "voice_preamble_end":
+                yield "voice_preamble_end", {"elapsed_ms": elapsed_ms_since(started_at)}
+
+            elif chunk_type == "voice_preamble_cancel":
+                yield "voice_preamble_cancel", {"elapsed_ms": elapsed_ms_since(started_at)}
+
             elif chunk_type == "knowledge_start":
                 yield "knowledge_start", {
                     "queries": chunk.get("queries", []),
