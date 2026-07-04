@@ -70,6 +70,104 @@ def _find_existing_flow(
     return rows[0] if rows else None
 
 
+def _condition_to_branch_expression(condition_config: dict[str, Any]) -> str | None:
+    variable = condition_config.get("variable")
+    if not variable:
+        expression = condition_config.get("expression")
+        return str(expression) if expression else None
+
+    value = condition_config.get("value")
+    if isinstance(value, bool):
+        return f"{variable} == {str(value).lower()}"
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return f"{variable} == {value}"
+    return f'{variable} == "{value}"'
+
+
+def ensure_template_ui_connections(template: dict[str, Any]) -> dict[str, Any]:
+    """
+    Admin UI는 node config의 next_node_key/branch_node_key로 연결선을 그린다.
+    edges만 있는 템플릿은 생성 전 node config 연결 필드를 보완한다.
+    """
+    nodes = [dict(node) for node in template.get("nodes") or []]
+    edges = template.get("edges") or []
+    if not nodes or not edges:
+        return template
+
+    node_by_key = {node["node_key"]: node for node in nodes if node.get("node_key")}
+
+    outgoing: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        source_key = edge.get("source_node_key")
+        if not source_key:
+            continue
+        outgoing.setdefault(source_key, []).append(edge)
+
+    for source_key, source_edges in outgoing.items():
+        source_node = node_by_key.get(source_key)
+        if not source_node:
+            continue
+
+        config = dict(source_node.get("config") or {})
+        if config.get("next_step_mode") == "end":
+            source_node["config"] = config
+            continue
+
+        sorted_edges = sorted(
+            source_edges,
+            key=lambda edge: (
+                1 if edge.get("is_failure_edge") else 0,
+                edge.get("priority") or 100,
+            ),
+        )
+
+        primary_edges = [
+            edge
+            for edge in sorted_edges
+            if not edge.get("is_failure_edge")
+            and edge.get("edge_type") != "fallback"
+            and edge.get("condition_type") != "fallback"
+            and not (edge.get("condition_config") or {}).get("fallback")
+        ]
+        fallback_edges = [edge for edge in sorted_edges if edge not in primary_edges]
+
+        if len(primary_edges) > 1 or fallback_edges:
+            config["next_step_mode"] = "branch"
+            match_edges = [
+                edge
+                for edge in primary_edges
+                if (edge.get("condition_config") or {}).get("value") is not False
+            ]
+            else_edges = [
+                edge
+                for edge in primary_edges
+                if (edge.get("condition_config") or {}).get("value") is False
+            ]
+
+            if match_edges and not config.get("branch_node_key"):
+                primary = match_edges[0]
+                config["branch_node_key"] = primary.get("target_node_key")
+                expression = _condition_to_branch_expression(primary.get("condition_config") or {})
+                if expression:
+                    config["branch_condition"] = expression
+
+            if else_edges and not config.get("fallback_node_key"):
+                config["fallback_node_key"] = else_edges[0].get("target_node_key")
+            elif fallback_edges and not config.get("fallback_node_key"):
+                config["fallback_node_key"] = fallback_edges[0].get("target_node_key")
+        elif len(primary_edges) == 1 and not config.get("next_node_key"):
+            config["next_step_mode"] = config.get("next_step_mode") or "single"
+            config["next_node_key"] = primary_edges[0].get("target_node_key")
+
+        source_node["config"] = config
+
+    patched = dict(template)
+    patched["nodes"] = list(node_by_key.values())
+    return patched
+
+
 def _delete_flow(client: Client, flow_id: str) -> None:
     client.table("task_edges").delete().eq("flow_id", flow_id).execute()
     client.table("task_nodes").delete().eq("flow_id", flow_id).execute()
@@ -87,7 +185,9 @@ def generate_task_flow_from_template(
     trigger_examples: list[str] | None = None,
     template: dict[str, Any] | None = None,
 ) -> GeneratedTaskFlow:
-    loaded_template = template or load_task_flow_template(template_key)
+    loaded_template = ensure_template_ui_connections(
+        template or load_task_flow_template(template_key)
+    )
     if loaded_template.get("template_key") and loaded_template["template_key"] != template_key:
         raise ValueError("template_key mismatch between argument and template payload")
 

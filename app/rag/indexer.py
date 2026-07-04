@@ -9,6 +9,7 @@ import re
 from app.core.db import supabase
 from app.providers.embedding_provider import create_embeddings_batch
 from app.rag.chunker import chunk_text
+from app.rag.query_matching import term_appears_in_text
 from app.rag.keyword_vocabulary import (
     OrganizationKeywordVocabulary,
     UNIVERSAL_SYNONYM_GROUPS,
@@ -17,7 +18,7 @@ from app.rag.keyword_vocabulary import (
 
 
 _KOREAN_QUESTION_SUFFIX = re.compile(
-    r"(얼마야|얼마예요|얼마인가요|얼마|인가요|인가|뭐야|뭐예요|뭐에요|무엇|어때|할까요|할까|인지)$"
+    r"(얼마야|얼마예요|얼마에요|얼마인가요|얼마|인가요|인가|뭐야|뭐예요|뭐에요|무엇|어때|할까요|할까|인지)$"
 )
 _KOREAN_VERB_SUFFIX = re.compile(
     r"(합니다|입니다|됩니다|해요|하세요|주세요|드립니다|진행됩니다|포함합니다|가능합니다)$"
@@ -67,13 +68,18 @@ def _expand_synonyms(word: str, vocabulary: OrganizationKeywordVocabulary | None
     return [normalized]
 
 
+def _strip_korean_token(word: str) -> str:
+    base = _KOREAN_QUESTION_SUFFIX.sub("", word).strip()
+    base = _KOREAN_VERB_SUFFIX.sub("", base).strip()
+    base = re.sub(r"(으로|로|에서|은|는|이|가|을|를|과|와)$", "", base).strip()
+    return base
+
+
 def _normalize_korean_keyword(
     word: str,
     vocabulary: OrganizationKeywordVocabulary | None,
 ) -> list[str]:
-    base = _KOREAN_QUESTION_SUFFIX.sub("", word).strip()
-    base = _KOREAN_VERB_SUFFIX.sub("", base).strip()
-    base = re.sub(r"(으로|로|에서|은|는|이|가|을|를|과|와)$", "", base).strip()
+    base = _strip_korean_token(word)
     if not base or len(base) < 2:
         return []
     return _expand_synonyms(base, vocabulary)
@@ -90,16 +96,18 @@ def _extract_vocabulary_keywords(
     text: str,
     vocabulary: OrganizationKeywordVocabulary,
     stopwords: set[str],
+    *,
+    expand_synonyms: bool = True,
 ) -> list[str]:
     """조직 vocabulary에 있는 용어가 chunk/질문에 등장하면 우선 추출."""
     keywords: list[str] = []
-    lowered = text.lower()
 
     for term in sorted(vocabulary.terms, key=len, reverse=True):
         if len(term) < 2 or term in stopwords:
             continue
-        if term in lowered:
-            _append_keywords(keywords, vocabulary.expand(term), stopwords)
+        if term_appears_in_text(term, text):
+            expanded = vocabulary.expand(term) if expand_synonyms else [term]
+            _append_keywords(keywords, expanded, stopwords)
 
     return keywords
 
@@ -108,6 +116,8 @@ def _extract_structured_keywords(
     text: str,
     vocabulary: OrganizationKeywordVocabulary | None,
     stopwords: set[str],
+    *,
+    expand_synonyms: bool = True,
 ) -> list[str]:
     """마크다운 카탈로그·가격·시간 등 업종 공통 구조 패턴."""
     keywords: list[str] = []
@@ -117,9 +127,15 @@ def _extract_structured_keywords(
         if not name:
             continue
         _append_keywords(keywords, [name], stopwords)
-        _append_keywords(keywords, _expand_synonyms(name, vocabulary), stopwords)
+        if expand_synonyms:
+            _append_keywords(keywords, _expand_synonyms(name, vocabulary), stopwords)
         for part in re.findall(r"[가-힣]{2,}", name):
-            _append_keywords(keywords, _normalize_korean_keyword(part, vocabulary), stopwords)
+            if expand_synonyms:
+                _append_keywords(keywords, _normalize_korean_keyword(part, vocabulary), stopwords)
+            else:
+                stripped = _strip_korean_token(part)
+                if stripped:
+                    _append_keywords(keywords, [stripped], stopwords)
 
     for match in _PRICE_PATTERN.finditer(text):
         _append_keywords(
@@ -156,21 +172,37 @@ def extract_keywords(
     text: str,
     max_keywords: int = 20,
     vocabulary: OrganizationKeywordVocabulary | None = None,
+    *,
+    for_query: bool = False,
 ) -> list[str]:
     """
     chunk/질문 텍스트에서 검색용 keyword를 추출한다.
 
     조직별 서비스명·상품명은 vocabulary(services/service_items/knowledge)에서
     불러오고, 코드에는 업종 공통 구조(가격/시간/마크다운 헤더)만 둔다.
+
+    for_query=True면 질의용으로 동의어 전체 확장을 생략한다(하이브리드 RPC
+    keyword_score 분모가 불필요하게 커지는 것을 막는다).
     """
     stopwords = set(_BASE_STOPWORDS)
+    expand_synonyms = not for_query
 
     org_keywords = (
-        _extract_vocabulary_keywords(text, vocabulary, stopwords)
+        _extract_vocabulary_keywords(
+            text,
+            vocabulary,
+            stopwords,
+            expand_synonyms=expand_synonyms,
+        )
         if vocabulary
         else []
     )
-    structured = _extract_structured_keywords(text, vocabulary, stopwords)
+    structured = _extract_structured_keywords(
+        text,
+        vocabulary,
+        stopwords,
+        expand_synonyms=expand_synonyms,
+    )
     financial = _extract_financial_keywords(text, stopwords)
 
     english: list[str] = []
@@ -183,7 +215,12 @@ def extract_keywords(
     for word in re.findall(r"[가-힣]{2,}", text):
         if word in stopwords or len(word) > 12:
             continue
-        korean.extend(_normalize_korean_keyword(word, vocabulary))
+        if expand_synonyms:
+            korean.extend(_normalize_korean_keyword(word, vocabulary))
+        else:
+            stripped = _strip_korean_token(word)
+            if stripped and len(stripped) >= 2:
+                korean.append(stripped.lower())
 
     numeric: list[str] = []
     for match in re.findall(
@@ -204,14 +241,81 @@ def extract_keywords(
         if len(result) >= max_keywords:
             break
 
+    if for_query:
+        return collapse_query_keywords(result, vocabulary)
     return result
+
+
+def collapse_query_keywords(
+    keywords: list[str],
+    vocabulary: OrganizationKeywordVocabulary | None = None,
+) -> list[str]:
+    """질의 keyword에서 동의어군·phrase partial 중복을 줄인다."""
+    groups: list[frozenset[str]] = list(UNIVERSAL_SYNONYM_GROUPS)
+    if vocabulary:
+        groups.extend(vocabulary.synonym_groups)
+
+    word_to_group: dict[str, int] = {}
+    for idx, group in enumerate(groups):
+        for word in group:
+            word_to_group[word.lower()] = idx
+
+    best_by_group: dict[int, str] = {}
+    for keyword in keywords:
+        key = keyword.lower().strip()
+        if len(key) < 2:
+            continue
+        group_id = word_to_group.get(key)
+        if group_id is None:
+            continue
+        current = best_by_group.get(group_id)
+        if current is None or len(key) > len(current):
+            best_by_group[group_id] = key
+
+    seen_groups: set[int] = set()
+    after_synonym: list[str] = []
+    seen_ungrouped: set[str] = set()
+    for keyword in keywords:
+        key = keyword.lower().strip()
+        if len(key) < 2:
+            continue
+        group_id = word_to_group.get(key)
+        if group_id is not None:
+            if group_id in seen_groups:
+                continue
+            seen_groups.add(group_id)
+            after_synonym.append(best_by_group[group_id])
+            continue
+        if key in seen_ungrouped:
+            continue
+        seen_ungrouped.add(key)
+        after_synonym.append(key)
+
+    norms = {keyword: keyword.replace(" ", "") for keyword in after_synonym}
+    drop: set[str] = set()
+    kept_norms: list[str] = []
+    for keyword in sorted(after_synonym, key=lambda item: len(norms[item]), reverse=True):
+        normalized = norms[keyword]
+        if any(
+            normalized != kept and len(normalized) < len(kept) and normalized in kept
+            for kept in kept_norms
+        ):
+            drop.add(keyword)
+            continue
+        if normalized in kept_norms:
+            drop.add(keyword)
+            continue
+        kept_norms.append(normalized)
+
+    return [keyword for keyword in after_synonym if keyword not in drop]
 
 
 def prepare_keywords_for_hybrid_rpc(keywords: list[str]) -> list[str]:
     """
     hybrid RPC에 넘길 keyword 배열.
-    공백 포함 phrase는 tsquery 오류를 막기 위해 붙여쓴 form + 토큰으로 펼친다.
+    공백 포함 phrase는 tsquery 오류를 막기 위해 붙여쓴 form만 추가한다.
     """
+    existing = {keyword.strip().lower() for keyword in keywords if keyword.strip()}
     seen: set[str] = set()
     prepared: list[str] = []
     for keyword in keywords:
@@ -219,9 +323,15 @@ def prepare_keywords_for_hybrid_rpc(keywords: list[str]) -> list[str]:
         if len(normalized) < 2:
             continue
         variants = [normalized]
+        compact = normalized.replace(" ", "")
+        if compact != normalized:
+            variants.append(compact)
+        elif " " not in normalized and len(normalized) >= 4:
+            variants.append(compact)
         if " " in normalized:
-            variants.append(normalized.replace(" ", ""))
-            variants.extend(part for part in normalized.split() if len(part) >= 2)
+            compact_variant = normalized.replace(" ", "")
+            if compact_variant not in variants:
+                variants.append(compact_variant)
         for variant in variants:
             if variant in seen:
                 continue

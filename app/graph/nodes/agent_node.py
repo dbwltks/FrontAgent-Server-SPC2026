@@ -28,6 +28,8 @@ from app.providers.langchain_provider import (
     get_voice_response_style,
     history_to_messages,
 )
+from app.rag.keyword_vocabulary import get_organization_keyword_vocabulary
+from app.rag.query_matching import looks_like_question, term_appears_in_text
 from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.rule_repo import get_active_rules
 from app.tasks.repository import TaskRepository
@@ -44,6 +46,8 @@ AGENT_SYSTEM_PROMPT_HEADER = """
 
 도구 사용 원칙:
 - 가격·정책·서비스 설명 등 지식 베이스 확인이 필요하면 search_knowledge를 호출한다.
+  "입주청소가 뭐에요?", "화장실 청소는 어떤 서비스예요?"처럼 서비스 설명·정의를
+  묻는 질문도 search_knowledge다. run_task가 아니다.
   "예약 변경 가능한가요?", "당일 취소되나요?", "주차 가능한가요?"처럼 일반적인
   정책/조건을 묻는 질문형 문장은 정보 문의이므로 search_knowledge를 호출한다.
 - 예약 생성·조회·취소·변경을 실제로 지금 실행해 달라는 요청이면 run_task를
@@ -89,8 +93,12 @@ class SearchKnowledgeArgs(BaseModel):
             "예: \"가격이 얼마예요?\", \"몇 시까지 해요?\") 대화 맥락(직전에 "
             "언급된 서비스명 등)을 반영해 구체적인 문장으로 보강한다. "
             "예: \"가격이 얼마예요?\" + 직전에 \"베란다 청소\" 언급 → "
-            "\"베란다 청소 가격이 얼마예요?\". 맥락이 없으면 일반적인 키워드를 "
-            "추가한다(예: \"몇 시까지 해요?\" → \"영업시간이 몇 시까지인가요?\")."
+            "\"베란다 청소 가격이 얼마예요?\". "
+            "이번 메시지에 다른 서비스명이 명시돼 있으면(예: 직전에 입주청소를 "
+            "물었더라도 이번에 \"화장실청소 얼마예요?\") 직전 서비스는 넣지 "
+            "말고 이번 메시지의 서비스만 검색한다. "
+            "맥락이 없으면 일반적인 키워드를 추가한다(예: \"몇 시까지 해요?\" → "
+            "\"영업시간이 몇 시까지인가요?\")."
         )
     )
 
@@ -222,7 +230,7 @@ def _prioritize_chunks_for_user_query(user_message: str, chunks: list[dict]) -> 
         for chunk in chunks
         if specified_norm in _normalize_service_label(chunk.get("content") or "")
     ]
-    return matching or chunks
+    return matching
 
 
 _TASK_SLOT_ANSWER_PATTERNS = (
@@ -234,14 +242,6 @@ _TASK_SLOT_ANSWER_PATTERNS = (
     re.compile(r"^\d{2,4}-\d{3,4}-\d{4}$"),
     re.compile(r"^(네|아니요|아니|응|좋아요|없어요|있어요|없습니다|있습니다)$"),
 )
-_INFO_QUESTION_TOPIC = re.compile(
-    r"(가격|비용|요금|얼마|정책|취소|변경|환불|영업|운영|주차|반려|평수|포함|"
-    r"소요\s*시간|얼마나\s*걸|걸리\s*는|몇\s*분|설명|안내|범위|차이|비교|주의|준비|필요|수수료|당일|하루\s*전|"
-    r"예약\s*변경|가능|불가|뭐\s*들|무엇|어떤)",
-    re.IGNORECASE,
-)
-
-
 def _extract_service_names_from_pending_prompt(pending: str) -> list[str]:
     match = re.search(r"\?\s*(.+?)\s*중에서\s*선택", pending)
     if not match:
@@ -252,6 +252,9 @@ def _extract_service_names_from_pending_prompt(pending: str) -> list[str]:
 def _looks_like_task_slot_answer(user_message: str, pending_task_prompt: str | None) -> bool:
     message = user_message.strip()
     if not message:
+        return False
+
+    if looks_like_question(message):
         return False
 
     for pattern in _TASK_SLOT_ANSWER_PATTERNS:
@@ -331,10 +334,7 @@ def _looks_like_knowledge_interrupt(
     user_message: str,
     pending_task_prompt: str | None = None,
 ) -> bool:
-    """
-    예약 task 진행 중 사용자가 slot 답변 대신 정보/정책/설명을 묻는지 판별.
-    가격(얼마)만이 아니라 취소·주차·포함항목·소요시간 등 FAQ 전반을 포함한다.
-    """
+    """예약 task 진행 중 slot 답변이 아닌 질문(FAQ)인지 판별."""
     message = user_message.strip()
     if not message:
         return False
@@ -342,23 +342,7 @@ def _looks_like_knowledge_interrupt(
     if _looks_like_task_slot_answer(message, pending_task_prompt):
         return False
 
-    if re.match(r"^(근데|그런데|아니|잠깐|미안)", message):
-        return True
-
-    has_question_form = bool(
-        re.search(
-            r"(\?|인가요|인가|되나요|될까요|할까요|알려|알려줘|뭐야|뭐에요|무엇|어떻게|궁금)",
-            message,
-        )
-    )
-    has_info_topic = bool(_INFO_QUESTION_TOPIC.search(message))
-
-    if has_question_form:
-        return True
-    if has_info_topic and len(message) > 4:
-        return True
-
-    return False
+    return looks_like_question(message)
 
 
 def _compose_direct_knowledge_answer(
@@ -378,6 +362,7 @@ def _compose_direct_knowledge_answer(
         return "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
 
     answer_chunks = _prioritize_chunks_for_user_query(user_message, chunks)
+
     if skip_service_clarify:
         parts: list[str] = []
         seen: set[str] = set()
@@ -393,7 +378,9 @@ def _compose_direct_knowledge_answer(
 
     message = message.strip()
     if resume_task_prompt:
-        message = f"{message} {resume_task_prompt}"
+        prompt = resume_task_prompt.strip()
+        if prompt and prompt not in message:
+            message = f"{message}\n\n{prompt}"
     return message
 
 
@@ -414,6 +401,65 @@ def _extract_available_service_names(variables: dict) -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+def _find_services_mentioned_in_message(user_message: str, organization_id: str) -> list[str]:
+    """이번 사용자 메시지에 명시된 조직 서비스명(카탈로그 vocabulary 기준)."""
+    vocabulary = get_organization_keyword_vocabulary(organization_id)
+
+    candidates: list[str] = []
+    seen_norms: set[str] = set()
+    for term in sorted(vocabulary.terms, key=len, reverse=True):
+        if len(_normalize_service_label(term)) < 4:
+            continue
+        if not term_appears_in_text(term, user_message):
+            continue
+        norm_term = _normalize_service_label(term)
+        if norm_term in seen_norms:
+            continue
+        seen_norms.add(norm_term)
+        candidates.append(term)
+
+    if len(candidates) <= 1:
+        return candidates
+
+    filtered: list[str] = []
+    norms = [_normalize_service_label(term) for term in candidates]
+    for index, term in enumerate(candidates):
+        norm = norms[index]
+        if any(norm != other and norm in other for other in norms):
+            continue
+        filtered.append(term)
+    return filtered
+
+
+def _resolve_knowledge_search_query(
+    user_message: str,
+    llm_query: str | None,
+    organization_id: str,
+    session_id: str,
+) -> str:
+    """
+    지식 검색 query를 확정한다.
+
+    이번 턴 메시지에 서비스명이 있으면 LLM/직전 턴 맥락을 섞지 않고
+    현재 질문만 검색한다. (입주청소 → 화장실청소 연속 질문 꼬임 방지)
+    """
+    message = user_message.strip()
+    if not message:
+        return (llm_query or "").strip()
+
+    if _find_services_mentioned_in_message(message, organization_id):
+        query = message
+        if _is_generic_price_question(message) and "가격" not in query:
+            query = f"{query} 가격"
+        return query
+
+    enriched = (llm_query or "").strip()
+    if enriched and enriched != message:
+        return enriched
+
+    return _build_knowledge_search_query(message, organization_id, session_id)
 
 
 def _build_knowledge_search_query(
@@ -444,7 +490,19 @@ def _build_knowledge_search_query(
     if service_names and not has_service_in_message:
         query_parts.extend(service_names[:6])
 
-    query = " ".join(part for part in query_parts if part)
+    deduped_parts: list[str] = []
+    seen_labels: set[str] = set()
+    for part in query_parts:
+        text = part.strip()
+        if not text:
+            continue
+        label = _normalize_service_label(text)
+        if label in seen_labels:
+            continue
+        seen_labels.add(label)
+        deduped_parts.append(text)
+
+    query = " ".join(deduped_parts)
     if re.search(r"얼마|가격|비용|요금", user_message) and "가격" not in query:
         query = f"{query} 가격"
     return query
@@ -540,15 +598,40 @@ async def _execute_search_knowledge(
     if not skip_service_clarify:
         clarify_items = _should_clarify_competing_services(user_message, chunks)
 
-    direct_message = _compose_direct_knowledge_answer(
-        user_message=user_message,
-        chunks=chunks,
-        clarify_items=clarify_items,
-        resume_task_prompt=resume_task_prompt,
-        skip_service_clarify=skip_service_clarify,
-    )
-    if direct_message:
+    # 서비스 선택 모호할 때는 코드로 처리 (LLM 불필요)
+    if clarify_items:
+        direct_message = (
+            f"어떤 서비스를 말씀하시는 걸까요? "
+            f"{', '.join(clarify_items)} 중에서 알려주시면 안내해 드릴게요."
+        )
         writer({"type": "ai_response_delta", "delta": direct_message})
+    elif not chunks:
+        direct_message = "확인해보니 관련 정보를 찾지 못했습니다. 담당자에게 다시 확인 후 안내드리겠습니다."
+        writer({"type": "ai_response_delta", "delta": direct_message})
+    else:
+        # LLM이 chunk를 보고 자연스럽게 해석해서 답한다.
+        # summarize_knowledge_chunk 없이 범용으로 처리.
+        answer_chunks = _prioritize_chunks_for_user_query(user_message, chunks)
+        context = "\n\n".join(c.get("content", "") for c in answer_chunks[:3])
+        system_prompt = (
+            "다음 지식을 바탕으로 사용자 질문에 친절하고 자연스럽게 답해라. "
+            "지식에 있는 내용만 사용하고 없는 내용은 만들지 않는다. "
+            "관련 항목이 여러 개면 모두 포함해라. 간결하게 핵심만 답한다."
+        )
+        if resume_task_prompt:
+            system_prompt += f"\n\n답변 후 예약 진행을 위해 이 질문을 이어가라: {resume_task_prompt}"
+
+        _model = await get_streaming_chat_model(organization_id)
+        interpret_msgs = [
+            {"role": "system", "content": f"{system_prompt}\n\n[지식]\n{context}"},
+            {"role": "user", "content": user_message},
+        ]
+        chunks_acc: list[str] = []
+        async for _chunk in _model.astream(interpret_msgs):
+            if _chunk.content:
+                chunks_acc.append(_chunk.content)
+                writer({"type": "ai_response_delta", "delta": _chunk.content})
+        direct_message = "".join(chunks_acc).strip()
 
     result = {
         "intent": "faq",
@@ -858,10 +941,11 @@ async def agent_node(state: AgentState) -> dict:
                 session_id=session_id,
             )
             resume_prompt = pending_task_prompt or (task_result_meta or {}).get("message")
-            search_query = _build_knowledge_search_query(
+            search_query = _resolve_knowledge_search_query(
                 user_message,
-                organization_id,
-                session_id,
+                llm_query=None,
+                organization_id=organization_id,
+                session_id=session_id,
             )
             return await _execute_search_knowledge(
                 organization_id=organization_id,
@@ -1000,7 +1084,12 @@ async def agent_node(state: AgentState) -> dict:
         return _build_end_session_state(farewell_message=farewell_message, rules=rules)
 
     if tool_name == "search_knowledge":
-        search_query = tool_args.get("query", user_message)
+        search_query = _resolve_knowledge_search_query(
+            user_message,
+            llm_query=tool_args.get("query"),
+            organization_id=organization_id,
+            session_id=session_id,
+        )
         return await _execute_search_knowledge(
             organization_id=organization_id,
             user_message=user_message,

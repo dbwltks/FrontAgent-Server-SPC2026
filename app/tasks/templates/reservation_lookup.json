@@ -11,61 +11,21 @@
       "예약 내역 알려줘",
       "내 예약이 있나요?"
     ],
-    "allowed_channels": [
-      "chat",
-      "voice"
-    ],
+    "allowed_channels": ["chat", "voice"],
     "filters": {},
     "is_enabled": true
   },
   "nodes": [
     {
-      "node_key": "start",
-      "node_type": "instruction",
-      "label": "전화번호 질문",
-      "config": {
-        "instruction": "[역할]\n고객에게 필요한 정보를 자연스럽게 질문하고 답변에서 값을 추출하는 에이전트다.\n\n[대화 흐름]\n- 예약 조회를 위해 예약하실 때 입력한 전화번호를 알려주세요. 예: 010-1234-5678\n\n[종료 조건]\n- customer_phone 값을 확인하면 종료한다.\n\n[예외 사항]\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.\n\n<promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>",
-        "next_step_mode": "single",
-        "save_to_memory": true
-      },
-      "code": null,
-      "position_x": 0,
-      "position_y": 0,
-      "timeout_seconds": 10,
-      "retry_limit": 0
-    },
-    {
-      "node_key": "lookup_reservations",
-      "node_type": "function",
-      "label": "예약 목록 조회",
-      "config": {
-        "params": {
-          "limit": 10,
-          "customer_phone": "{{memory.customer_phone}}",
-          "organization_id": "a55c98f9-74ba-40d8-bc9d-bc3f1c0870da"
-        },
-        "save_as": "lookup_result",
-        "action_key": "reservation.list_reservations",
-        "function_name": "reservation.list_reservations",
-        "flatten_result": true
-      },
-      "code": null,
-      "position_x": 300,
-      "position_y": 0,
-      "timeout_seconds": 10,
-      "retry_limit": 0
-    },
-    {
       "node_key": "found_end",
       "node_type": "message",
       "label": "예약 조회 완료",
       "config": {
-        "message": "예약 내역을 확인했습니다. 입력하신 전화번호로 조회된 예약이 있습니다.",
+        "message": "{{memory.lookup_result_message|입력하신 전화번호로 조회된 예약을 찾지 못했습니다.}}",
         "next_step_mode": "end"
       },
-      "code": null,
-      "position_x": 600,
-      "position_y": -100,
+      "position_x": 1360,
+      "position_y": 200,
       "timeout_seconds": 10,
       "retry_limit": 0
     },
@@ -77,9 +37,45 @@
         "message": "입력하신 전화번호로 조회된 예약을 찾지 못했습니다. 전화번호를 다시 확인해주세요.",
         "next_step_mode": "end"
       },
-      "code": null,
-      "position_x": 600,
-      "position_y": 100,
+      "position_x": 1360,
+      "position_y": 420,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "lookup_reservations",
+      "node_type": "function",
+      "label": "예약 목록 조회",
+      "config": {
+        "params": {
+          "limit": 10,
+          "customer_phone": "{{memory.customer_phone}}"
+        },
+        "save_as": "lookup_result",
+        "function_name": "reservation.list_reservations",
+        "flatten_result": true,
+        "next_step_mode": "branch",
+        "branch_node_key": "found_end",
+        "branch_condition": "memory.has_reservations == true",
+        "fallback_node_key": "not_found_end"
+      },
+      "position_x": 960,
+      "position_y": 280,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "start",
+      "node_type": "instruction",
+      "label": "전화번호 질문",
+      "config": {
+        "instruction": "[역할]\n고객에게 필요한 정보를 자연스럽게 질문하고 답변에서 값을 추출하는 에이전트다.\n\n[대화 흐름]\n- 예약 조회를 위해 예약하실 때 입력한 전화번호를 알려주세요. 예: 010-1234-5678\n\n[종료 조건]\n- customer_phone 값을 확인하면 종료한다.\n\n[예외 사항]\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.\n\n<promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>",
+        "next_step_mode": "single",
+        "next_node_key": "lookup_reservations",
+        "save_to_memory": true
+      },
+      "position_x": 520,
+      "position_y": 280,
       "timeout_seconds": 10,
       "retry_limit": 0
     }
@@ -97,11 +93,10 @@
     {
       "source_node_key": "lookup_reservations",
       "target_node_key": "found_end",
-      "edge_type": "condition",
-      "condition_type": "equals",
+      "edge_type": "single",
+      "condition_type": "always",
       "condition_config": {
-        "value": true,
-        "variable": "memory.has_reservations"
+        "expression": "memory.has_reservations == true"
       },
       "is_failure_edge": false,
       "priority": 100
@@ -109,13 +104,12 @@
     {
       "source_node_key": "lookup_reservations",
       "target_node_key": "not_found_end",
-      "edge_type": "condition",
-      "condition_type": "equals",
+      "edge_type": "fallback",
+      "condition_type": "fallback",
       "condition_config": {
-        "value": false,
-        "variable": "memory.has_reservations"
+        "fallback": true
       },
-      "is_failure_edge": false,
+      "is_failure_edge": true,
       "priority": 200
     }
   ]

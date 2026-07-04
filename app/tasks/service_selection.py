@@ -1,8 +1,12 @@
 from typing import Any
+import re
 
 from app.tasks.function_registry import reservation_resolve_service_item
 from app.tasks.memory import TaskMemory
 from app.tasks.types import ExecutorResult
+
+_PHONE_PATTERN = re.compile(r"^01[0-9]")
+_SELECTION_NUMBER_PATTERN = re.compile(r"(\d+)")
 
 
 def build_service_selection_message(
@@ -30,6 +34,93 @@ def build_service_selection_message(
         return None
 
     return f"어떤 서비스를 원하시나요? {', '.join(service_names)} 중에서 선택해 주세요."
+
+
+def _looks_like_phone_number(text: str) -> bool:
+    digits = re.sub(r"\D", "", (text or "").strip())
+    return len(digits) >= 10 and digits.startswith("01")
+
+
+def _parse_reservation_selection_number(text: str | None) -> int | None:
+    if not text or _looks_like_phone_number(text):
+        return None
+
+    match = _SELECTION_NUMBER_PATTERN.search(text.strip())
+    if not match:
+        return None
+
+    number = int(match.group(1))
+    return number if number > 0 else None
+
+
+def build_lookup_result_message(variables: dict[str, Any]) -> str | None:
+    options = variables.get("reservation_options") or []
+    labels = [
+        str(option.get("label")).strip()
+        for option in options
+        if isinstance(option, dict) and option.get("label")
+    ]
+    if not labels:
+        return None
+
+    listing = "\n".join(labels)
+    return f"입력하신 전화번호로 조회된 예약입니다.\n{listing}"
+
+
+def build_cancel_selection_message(variables: dict[str, Any]) -> str | None:
+    options = variables.get("cancelable_options") or []
+    labels = [
+        str(option.get("label")).strip()
+        for option in options
+        if isinstance(option, dict) and option.get("label")
+    ]
+    if not labels:
+        return None
+
+    listing = "\n".join(labels)
+    return (
+        "취소 가능한 예약을 찾았습니다. 취소할 예약 번호를 알려주세요.\n"
+        f"{listing}"
+    )
+
+
+def try_fast_path_ask_cancel_number_instruction(
+    *,
+    node: dict[str, Any],
+    memory: TaskMemory,
+    user_message: str | None,
+) -> ExecutorResult | None:
+    """
+    ask_cancel_number instruction 노드에서 LLM 없이 예약 목록 안내·번호 선택 처리.
+    """
+    if node.get("node_key") != "ask_cancel_number":
+        return None
+
+    variables = memory.to_dict()
+    options = variables.get("cancelable_options") or []
+    if not options:
+        return None
+
+    if user_message:
+        selection = _parse_reservation_selection_number(user_message)
+        if selection is not None and 1 <= selection <= len(options):
+            return ExecutorResult(
+                status="success",
+                message=None,
+                memory_updates={"selected_reservation_number": str(selection)},
+                next_behavior="evaluate_edges",
+            )
+
+    selection_message = build_cancel_selection_message(variables)
+    if not selection_message:
+        return None
+
+    return ExecutorResult(
+        status="success",
+        message=selection_message,
+        memory_updates={},
+        next_behavior="wait_user",
+    )
 
 
 def _memory_updates_from_resolve_result(result: dict[str, Any], user_message: str) -> dict[str, Any]:

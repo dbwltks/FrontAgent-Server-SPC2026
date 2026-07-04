@@ -5,8 +5,11 @@ from app.graph.nodes.agent_node import (
     _extract_available_service_names,
     _looks_like_knowledge_interrupt,
     _looks_like_task_slot_answer,
+    _prioritize_chunks_for_user_query,
+    _resolve_knowledge_search_query,
     _task_turn_made_progress,
 )
+from app.rag.query_matching import looks_like_question
 
 ASK_SERVICE_PROMPT = (
     "어떤 서비스를 원하시나요? "
@@ -18,6 +21,13 @@ def test_service_selection_answer_is_not_faq_interrupt():
     message = "저 화장실청소요"
     assert _looks_like_task_slot_answer(message, ASK_SERVICE_PROMPT) is True
     assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is False
+
+
+def test_question_with_service_name_during_selection_is_faq_interrupt():
+    for message in ("입주청소가 뭐에요?", "입주청소얼마에요?"):
+        assert looks_like_question(message) is True
+        assert _looks_like_task_slot_answer(message, ASK_SERVICE_PROMPT) is False
+        assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is True
 
 
 def test_service_selection_short_answer_is_not_faq_interrupt():
@@ -97,3 +107,57 @@ def test_build_knowledge_search_query_skips_catalog_when_service_named(mock_reso
     query = _build_knowledge_search_query("화장실 청소 가격", "org", "session")
     assert query.count("화장실 청소") == 1
     assert "베란다 청소" not in query
+
+
+@patch("app.graph.nodes.agent_node.get_organization_keyword_vocabulary")
+@patch("app.graph.nodes.agent_node.resolve_task_variables")
+def test_resolve_knowledge_search_query_ignores_llm_when_service_named(
+    mock_resolve,
+    mock_vocab,
+):
+    mock_resolve.return_value = {}
+    mock_vocab.return_value.terms = {
+        "입주 청소",
+        "입주청소",
+        "화장실 청소",
+        "화장실청소",
+    }
+    mock_vocab.return_value.synonym_groups = ()
+
+    query = _resolve_knowledge_search_query(
+        "화장실청소얼마에요?",
+        llm_query="입주청소 화장실청소 가격",
+        organization_id="org",
+        session_id="session",
+    )
+    assert query == "화장실청소얼마에요? 가격"
+    assert "입주" not in query
+
+
+@patch("app.graph.nodes.agent_node.get_organization_keyword_vocabulary")
+@patch("app.graph.nodes.agent_node.resolve_task_variables")
+def test_resolve_knowledge_search_query_uses_llm_for_vague_follow_up(
+    mock_resolve,
+    mock_vocab,
+):
+    mock_resolve.return_value = {}
+    mock_vocab.return_value.terms = {"입주 청소", "입주청소", "화장실 청소"}
+    mock_vocab.return_value.synonym_groups = ()
+
+    query = _resolve_knowledge_search_query(
+        "근데 얼마예요?",
+        llm_query="입주청소 가격",
+        organization_id="org",
+        session_id="session",
+    )
+    assert query == "입주청소 가격"
+
+
+def test_prioritize_chunks_does_not_fallback_to_other_service():
+    chunks = [
+        {"content": "### 서비스 아이템: 입주 청소\n설명: 500000원", "similarity": 0.5},
+        {"content": "### 서비스 아이템: 화장실 청소\n설명: 80000원", "similarity": 0.49},
+    ]
+    prioritized = _prioritize_chunks_for_user_query("화장실청소얼마에요?", chunks)
+    assert len(prioritized) == 1
+    assert "화장실 청소" in prioritized[0]["content"]

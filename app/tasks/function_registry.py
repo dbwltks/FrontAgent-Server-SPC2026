@@ -343,6 +343,23 @@ def _format_reservation_option(
     reservation: dict[str, Any],
     index: int,
 ) -> dict[str, Any]:
+    ordered_summary = reservation.get("ordered_summary") or {}
+    service_item = ordered_summary.get("service_item") or {}
+    service_name = service_item.get("name") or reservation.get("service_name") or "서비스"
+
+    start_at = reservation.get("start_at")
+    start_label = start_at
+    if start_at:
+        try:
+            start_label = _parse_datetime_value(start_at, "Asia/Seoul").strftime(
+                "%m/%d %H:%M"
+            )
+        except Exception:
+            start_label = start_at
+
+    customer_name = reservation.get("customer_name") or "고객"
+    status = reservation.get("status") or "-"
+
     return {
         "number": index,
         "reservation_id": reservation.get("id"),
@@ -352,11 +369,7 @@ def _format_reservation_option(
         "start_at": reservation.get("start_at"),
         "end_at": reservation.get("end_at"),
         "status": reservation.get("status"),
-        "label": (
-            f"{index}. {reservation.get('customer_name') or '고객'} / "
-            f"{reservation.get('start_at')} / "
-            f"상태: {reservation.get('status')}"
-        ),
+        "label": f"{index}. {service_name} / {start_label} / {customer_name} ({status})",
     }
 
 
@@ -1240,6 +1253,13 @@ def reservation_list_reservations(
             for index, reservation in enumerate(reservations, start=1)
         ]
 
+        variables_for_message = {
+            "reservation_options": reservation_options,
+        }
+        from app.tasks.service_selection import build_lookup_result_message
+
+        lookup_result_message = build_lookup_result_message(variables_for_message)
+
         return {
             "ok": True,
             "found": len(reservations) > 0,
@@ -1247,6 +1267,7 @@ def reservation_list_reservations(
             "customer_phone": customer_phone,
             "reservations": reservations,
             "reservation_options": reservation_options,
+            "lookup_result_message": lookup_result_message,
             "count": len(reservations),
         }
 

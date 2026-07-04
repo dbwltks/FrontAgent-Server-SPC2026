@@ -8,7 +8,10 @@ from openai import AsyncOpenAI
 from app.core.config import settings
 from app.tasks.edge_evaluator import get_value_by_path
 from app.tasks.memory import TaskMemory
-from app.tasks.service_selection import try_fast_path_ask_service_instruction
+from app.tasks.service_selection import (
+    try_fast_path_ask_cancel_number_instruction,
+    try_fast_path_ask_service_instruction,
+)
 from app.tasks.types import ExecutorResult
 
 
@@ -177,6 +180,14 @@ async def execute_instruction_node(
         memory=memory,
         user_message=user_message,
         organization_id=organization_id,
+    )
+    if fast_path is not None:
+        return fast_path
+
+    fast_path = try_fast_path_ask_cancel_number_instruction(
+        node=node,
+        memory=memory,
+        user_message=user_message,
     )
     if fast_path is not None:
         return fast_path
