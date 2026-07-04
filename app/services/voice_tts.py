@@ -1,13 +1,9 @@
-import asyncio
-import base64
 import io
-import json
 import logging
 import wave
 from typing import AsyncIterator
 
 import httpx
-import websockets
 from fastapi import HTTPException
 
 from app.core.config import settings
@@ -17,11 +13,8 @@ logger = logging.getLogger(__name__)
 
 OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
 ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech"
-ELEVENLABS_WS_URL = "wss://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream-input"
 # ElevenLabs는 raw PCM을 주므로 이 샘플레이트로 받아 WAV 헤더를 씌워 통일한다.
 ELEVENLABS_PCM_RATE = 24000
-# ElevenLabs WebSocket 공식 기본값. 문장 경계 flush와 함께 쓰면 짧은 답변도 즉시 생성된다.
-ELEVENLABS_WS_CHUNK_LENGTH_SCHEDULE = [120, 160, 250, 290]
 # wav(PCM)는 청크 경계에 인코더 패딩/갭이 없어 문장 단위 순차 재생이 안정적이다.
 TTS_RESPONSE_FORMAT = "wav"
 TTS_CONTENT_TYPE = "audio/wav"
@@ -215,124 +208,6 @@ async def _stream_elevenlabs(speech_text: str, tts: dict) -> AsyncIterator[bytes
 
     if pcm_buffer:
         yield _pcm16_to_wav(bytes(pcm_buffer), ELEVENLABS_PCM_RATE)
-
-
-class ElevenLabsWebSocketTTS:
-    """
-    ElevenLabs WebSocket TTS 세션 (공식 realtime TTS 가이드 패턴).
-
-    - InitializeConnection: generation_config.chunk_length_schedule (기본값)
-    - LLM delta는 try_trigger_generation 없이 스트리밍
-    - 문장/턴 경계에서 flush: true 로 버퍼 강제 생성
-    - 종료: {"text": ""} (CloseConnection)
-    """
-
-    def __init__(self, tts: dict) -> None:
-        self._tts = tts
-        self._api_key = settings.elevenlabs_api_key
-        self._voice_id = tts.get("elevenlabs_voice_id") or settings.elevenlabs_voice_id
-        self._model_id = tts.get("elevenlabs_model") or settings.elevenlabs_model
-        self._ws = None
-        self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-        self._receiver_task: asyncio.Task | None = None
-        self._send_lock = asyncio.Lock()
-
-    async def __aenter__(self) -> "ElevenLabsWebSocketTTS":
-        if not self._api_key or not self._voice_id:
-            raise HTTPException(status_code=500, detail="ElevenLabs is not configured")
-
-        url = (
-            ELEVENLABS_WS_URL.format(voice_id=self._voice_id)
-            + f"?model_id={self._model_id}"
-            + f"&output_format=pcm_{ELEVENLABS_PCM_RATE}"
-        )
-        self._ws = await websockets.connect(
-            url,
-            additional_headers={"xi-api-key": self._api_key},
-        )
-        # InitializeConnection: 공식 문서의 generation_config + voice_settings
-        await self._send_payload({
-            "text": " ",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
-            "generation_config": {
-                "chunk_length_schedule": ELEVENLABS_WS_CHUNK_LENGTH_SCHEDULE,
-            },
-        })
-        # 오디오 수신 백그라운드 태스크
-        self._receiver_task = asyncio.create_task(self._receive_loop())
-        return self
-
-    async def __aexit__(self, *_) -> None:
-        if self._ws:
-            try:
-                # 종료 신호 전송 후 수신 루프가 끝나길 기다린다
-                await self._send_payload({"text": ""})
-            except Exception:
-                pass
-        # 수신 루프 완료 대기 (루프 내에서 None을 queue에 넣음)
-        if self._receiver_task:
-            try:
-                await asyncio.wait_for(self._receiver_task, timeout=10.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-                pass
-        if self._ws:
-            try:
-                await self._ws.close()
-            except Exception:
-                pass
-
-    async def _receive_loop(self) -> None:
-        pcm_buffer = bytearray()
-        try:
-            async for raw in self._ws:
-                msg = json.loads(raw)
-                if msg.get("audio"):
-                    pcm_buffer.extend(base64.b64decode(msg["audio"]))
-                    while len(pcm_buffer) >= _ELEVENLABS_STREAM_CHUNK_BYTES:
-                        chunk = bytes(pcm_buffer[:_ELEVENLABS_STREAM_CHUNK_BYTES])
-                        del pcm_buffer[:_ELEVENLABS_STREAM_CHUNK_BYTES]
-                        await self._audio_queue.put(_pcm16_to_wav(chunk, ELEVENLABS_PCM_RATE))
-                if msg.get("isFinal"):
-                    break
-        except Exception:
-            logger.exception("ElevenLabs WebSocket receive failed")
-        finally:
-            if pcm_buffer:
-                await self._audio_queue.put(_pcm16_to_wav(bytes(pcm_buffer), ELEVENLABS_PCM_RATE))
-            await self._audio_queue.put(None)
-
-    async def _send_payload(self, payload: dict) -> None:
-        if not self._ws:
-            return
-        async with self._send_lock:
-            await self._ws.send(json.dumps(payload))
-
-    @staticmethod
-    def _format_send_text(text: str) -> str:
-        return text if text.endswith(" ") else f"{text} "
-
-    async def send_text(self, text: str, *, flush: bool = False) -> None:
-        """LLM delta/문장 텍스트를 WebSocket으로 전송한다. flush=True면 버퍼를 즉시 생성."""
-        if not self._ws:
-            return
-        if not text.strip() and not flush:
-            return
-        payload: dict = {"text": self._format_send_text(text) if text.strip() else " "}
-        if flush:
-            payload["flush"] = True
-        await self._send_payload(payload)
-
-    async def flush(self, text: str = "") -> None:
-        """문장/턴 경계에서 버퍼에 쌓인 텍스트를 강제 생성한다."""
-        await self.send_text(text, flush=True)
-
-    async def iter_audio(self) -> AsyncIterator[bytes]:
-        """생성된 오디오 WAV 청크를 순서대로 yield한다."""
-        while True:
-            chunk = await self._audio_queue.get()
-            if chunk is None:
-                break
-            yield chunk
 
 
 async def stream_speech_content(
