@@ -43,6 +43,6 @@ def test_apply_brief_plan_patches_flow_and_instructions():
     assert patched["flow"]["name"] == "입주청소 예약"
     assert patched["flow"]["trigger_examples"][0] == "입주청소 예약"
 
-    ask_date = next(n for n in patched["nodes"] if n["node_key"] == "ask_date")
-    assert "[운영자 맞춤 설정]" in ask_date["config"]["instruction"]
-    assert "party_size" in ask_date["config"]["instruction"]
+    ask_details = next(n for n in patched["nodes"] if n["node_key"] == "ask_reservation_details")
+    assert "[운영자 맞춤 설정]" in ask_details["config"]["instruction"]
+    assert "party_size" in ask_details["config"]["instruction"]

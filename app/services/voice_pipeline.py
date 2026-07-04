@@ -22,6 +22,7 @@ from app.services.voice_tts import (
     TTS_CONTENT_TYPE,
     TTS_MAX_CONCURRENCY,
     TTS_RESPONSE_FORMAT,
+    ElevenLabsWebSocketTTS,
     resolve_tts_config,
     synthesize_speech_content,
     tts_log_fields,
@@ -144,6 +145,13 @@ async def stream_pipeline_voice_turn_events(
         final_state: dict = {}
         answer_chunks: list[str] = []
 
+        # ElevenLabs WebSocket TTS 사용 여부
+        use_ws_tts = (
+            tts_config.get("provider") == "elevenlabs"
+            and bool(settings.elevenlabs_api_key)
+            and bool(tts_config.get("elevenlabs_voice_id"))
+        )
+
         # 스트리밍 TTS 상태. 문장이 완성되면 백그라운드 task로 합성하고,
         # 완성된 오디오 청크는 delta 사이사이 흘려보낸다(delta 방출을 막지 않음).
         tts_buffer = ""
@@ -207,14 +215,32 @@ async def stream_pipeline_voice_turn_events(
             return ready
 
         pending_conversation_messages: list[str] = []
+        _ws_tts: ElevenLabsWebSocketTTS | None = None
+        ws_tts_buffer = ""
 
-        def on_delta(delta: str) -> None:
+        async def flush_ws_tts_at_boundary(*, flush_all: bool = False) -> None:
+            nonlocal ws_tts_buffer
+            if _ws_tts is None:
+                return
+            segments, ws_tts_buffer = split_tts_segments(ws_tts_buffer, flush_all=flush_all)
+            for _ in segments:
+                await _ws_tts.flush()
+
+        async def on_delta(delta: str) -> None:
             answer_chunks.append(delta)
             nonlocal tts_buffer
             tts_buffer += delta
-            segments, tts_buffer = split_tts_segments(tts_buffer)
-            for segment in segments:
-                schedule_segment(segment)
+            if _ws_tts is not None:
+                nonlocal ws_tts_buffer
+                ws_tts_buffer += delta
+                await _ws_tts.send_text(delta)
+                segments, ws_tts_buffer = split_tts_segments(ws_tts_buffer)
+                for _ in segments:
+                    await _ws_tts.flush()
+            else:
+                segments, tts_buffer = split_tts_segments(tts_buffer)
+                for segment in segments:
+                    schedule_segment(segment)
 
         def on_node_update(node_name: str, node_state: dict) -> None:
             if node_name != "conversation":
@@ -237,6 +263,15 @@ async def stream_pipeline_voice_turn_events(
                 )
             )
 
+        if use_ws_tts:
+            # ElevenLabs WebSocket TTS: LLM delta를 실시간으로 전송
+            ws_ctx = ElevenLabsWebSocketTTS(tts_config)
+            try:
+                _ws_tts = await ws_ctx.__aenter__()
+            except Exception:
+                logger.warning("ElevenLabs WebSocket TTS 초기화 실패, HTTP 방식으로 폴백")
+                _ws_tts = None
+
         async for event, data in stream_agent_graph_events(
             agent_graph=agent_graph,
             initial_state=initial_state,
@@ -248,8 +283,6 @@ async def stream_pipeline_voice_turn_events(
             if event == "final_state":
                 final_state = data
                 continue
-            # voice_preamble: tool_call 확정 즉시 호응 텍스트를 TTS로 바로 합성.
-            # split_tts_segments를 거치지 않고 즉시 schedule해 지연 없이 재생.
             yield sse_event(event, data)
             for audio_event in drain_ready_audio():
                 yield audio_event
@@ -289,20 +322,49 @@ async def stream_pipeline_voice_turn_events(
             },
         )
 
-        # 남은 버퍼(마지막 문장)를 합성 예약한다.
-        segments, tts_buffer = split_tts_segments(tts_buffer, flush_all=True)
-        for segment in segments:
-            schedule_segment(segment)
+        if _ws_tts is not None:
+            if not answer_chunks and answer:
+                await _ws_tts.send_text(answer, flush=True)
+            else:
+                await flush_ws_tts_at_boundary(flush_all=True)
+                await _ws_tts.flush()
+            audio_index_ws = 0
+            # iter_audio는 _receive_loop가 None을 넣을 때까지 yield하므로
+            # __aexit__(종료 신호 전송 + 수신 루프 완료 대기)와 병렬로 소비한다
+            async def _close_ws():
+                await ws_ctx.__aexit__(None, None, None)
 
-        # delta가 한 번도 흐르지 않았는데 최종 답변만 있는 경우(예: 논스트리밍 폴백) 대비.
-        if audio_index == 0 and answer:
-            schedule_segment(answer)
+            close_task = asyncio.create_task(_close_ws())
+            async for wav_chunk in _ws_tts.iter_audio():
+                total_audio_bytes += len(wav_chunk)
+                yield sse_event(
+                    "audio",
+                    {
+                        "content_type": TTS_CONTENT_TYPE,
+                        "audio_base64": base64.b64encode(wav_chunk).decode("ascii"),
+                        "index": audio_index_ws,
+                        "elapsed_ms": elapsed_ms_since(started_at),
+                    },
+                )
+                audio_index_ws += 1
+            await close_task
+            _ws_tts = None
+            audio_index = audio_index_ws
+        else:
+            # HTTP TTS: 남은 버퍼(마지막 문장)를 합성 예약한다.
+            segments, tts_buffer = split_tts_segments(tts_buffer, flush_all=True)
+            for segment in segments:
+                schedule_segment(segment)
 
-        # 남은 TTS task가 끝나기를 기다리며, 준비되는 청크를 순서대로 흘려보낸다.
-        for task in asyncio.as_completed(tts_tasks):
-            await task
-            for audio_event in drain_ready_audio():
-                yield audio_event
+            # delta가 한 번도 흐르지 않았는데 최종 답변만 있는 경우(예: 논스트리밍 폴백) 대비.
+            if audio_index == 0 and answer:
+                schedule_segment(answer)
+
+            # 남은 TTS task가 끝나기를 기다리며, 준비되는 청크를 순서대로 흘려보낸다.
+            for task in asyncio.as_completed(tts_tasks):
+                await task
+                for audio_event in drain_ready_audio():
+                    yield audio_event
         for audio_event in drain_ready_audio():
             yield audio_event
 

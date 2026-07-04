@@ -6,7 +6,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.tasks.edge_evaluator import get_value_by_path
+from app.tasks.edge_evaluator import evaluate_condition_expression, get_value_by_path
 from app.tasks.memory import TaskMemory
 from app.tasks.service_selection import (
     try_fast_path_ask_cancel_number_instruction,
@@ -133,6 +133,8 @@ def _build_conversation_instruction_prompt(
 - 읽기 전용 변수와 현재 값: {json.dumps(read_values, ensure_ascii=False)}
 - 고객 답변이 모호하면 값을 추측하지 말고 message로 확인 질문을 한다.
 - "내일", "모레", "다음 주 토요일", "이번 주말"처럼 상대적인 날짜/시간 표현은 모호한 것이 아니라, 아래 현재 시각을 기준으로 절대 날짜/시간(YYYY-MM-DD, HH:MM)으로 변환해서 저장한다.
+- Instruction에 정의된 슬롯 중, 고객 한 메시지에서 동시에 추출 가능한 값은 memory_updates에 함께 넣는다(예: "7월2일 14시" → reservation_date + reservation_time).
+- Current Memory에 이미 채워진 슬롯은 message에서 다시 묻지 않는다. message는 아직 비어 있는 슬롯만 질문한다.
 - 이미 memory에 있는 값은 유지한다.
 - 종료 조건이 충족되면 message는 null로 둔다.
 
@@ -241,6 +243,13 @@ async def execute_instruction_node(
             }
             is_complete = parsed_result.get("is_complete") is True
             message = parsed_result.get("message")
+
+            branch_condition = config.get("branch_condition")
+            if branch_condition and branch_condition.strip():
+                merged_memory = {**memory.to_dict(), **memory_updates}
+                if evaluate_condition_expression(branch_condition, merged_memory):
+                    is_complete = True
+                    message = None
 
             return ExecutorResult(
                 status="success",

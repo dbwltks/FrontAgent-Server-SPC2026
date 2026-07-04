@@ -914,10 +914,10 @@ def _add_month(year: int, month: int) -> tuple[int, int]:
     return year, month + 1
 
 
-def _parse_korean_reservation_datetime(
+def _parse_korean_reservation_date(
     text: str,
     timezone: str = "Asia/Seoul",
-) -> datetime | None:
+) -> date | None:
     tz = ZoneInfo(timezone)
     now = datetime.now(tz)
     raw_text = str(text or "").strip()
@@ -925,18 +925,16 @@ def _parse_korean_reservation_datetime(
     if not raw_text:
         return None
 
-    # 이미 ISO 형식으로 들어온 경우도 그대로 허용
     try:
         parsed = datetime.fromisoformat(raw_text)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=tz)
-        return parsed.astimezone(tz)
+        return parsed.astimezone(tz).date()
     except ValueError:
         pass
 
     normalized = raw_text.replace(" ", "")
 
-    # 날짜 파싱
     target_date = None
 
     if "오늘" in normalized:
@@ -948,7 +946,6 @@ def _parse_korean_reservation_datetime(
     elif "글피" in normalized:
         target_date = (now + timedelta(days=3)).date()
 
-    # 예: 7월5일, 7/5
     if target_date is None:
         month_day_match = re.search(r"(?P<month>\d{1,2})\s*(월|/)\s*(?P<day>\d{1,2})\s*일?", raw_text)
         if month_day_match:
@@ -962,7 +959,6 @@ def _parse_korean_reservation_datetime(
 
             target_date = datetime(year, month, day, tzinfo=tz).date()
 
-    # 예: 5일 오후 1시
     if target_date is None:
         day_match = re.search(r"(?P<day>\d{1,2})\s*일", raw_text)
         if day_match:
@@ -988,10 +984,20 @@ def _parse_korean_reservation_datetime(
 
             target_date = candidate
 
-    if target_date is None:
+    return target_date
+
+
+def _parse_korean_reservation_time(text: str) -> time | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
         return None
 
-    # 시간 파싱
+    try:
+        parsed = datetime.fromisoformat(raw_text)
+        return parsed.time()
+    except ValueError:
+        pass
+
     time_match = re.search(
         r"(?P<ampm>오전|오후|아침|낮|저녁|밤)?\s*(?P<hour>\d{1,2})\s*시\s*(?P<minute>\d{1,2})?\s*분?",
         raw_text,
@@ -1013,18 +1019,31 @@ def _parse_korean_reservation_datetime(
     elif ampm == "오전":
         if hour == 12:
             hour = 0
-    else:
-        # 예약 서비스에서는 "3시"를 보통 오후 3시로 말하는 경우가 많아서
-        # 1~7시는 오후로 보정
-        if 1 <= hour <= 7:
-            hour += 12
+    elif 1 <= hour <= 7:
+        hour += 12
+
+    return time(hour, minute)
+
+
+def _parse_korean_reservation_datetime(
+    text: str,
+    timezone: str = "Asia/Seoul",
+) -> datetime | None:
+    tz = ZoneInfo(timezone)
+    target_date = _parse_korean_reservation_date(text, timezone=timezone)
+    if target_date is None:
+        return None
+
+    parsed_time = _parse_korean_reservation_time(text)
+    if parsed_time is None:
+        return None
 
     return datetime(
         target_date.year,
         target_date.month,
         target_date.day,
-        hour,
-        minute,
+        parsed_time.hour,
+        parsed_time.minute,
         tzinfo=tz,
     )
 

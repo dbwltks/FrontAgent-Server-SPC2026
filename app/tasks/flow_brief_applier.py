@@ -6,7 +6,7 @@ from typing import Any
 from app.tasks.flow_brief_planner import TaskFlowBriefPlan
 
 _INSTRUCTION_NODE_KEYS = {
-    "reservation_create": ("ask_service", "ask_party_size", "ask_date", "ask_name"),
+    "reservation_create": ("ask_service", "ask_reservation_details"),
     "reservation_lookup": ("start",),
     "reservation_cancel": ("start", "ask_cancel_number"),
 }
