@@ -7,7 +7,7 @@ from app.core.db import supabase
 logger = logging.getLogger(__name__)
 
 ALLOWED_VOICE_MODES = {"pipeline", "realtime"}
-ALLOWED_STT_PROVIDERS = {"openai", "clova"}
+ALLOWED_STT_PROVIDERS = {"openai", "clova", "deepgram"}
 ALLOWED_TTS_PROVIDERS = {"openai", "elevenlabs"}
 ALLOWED_VOICE_RESPONSE_STYLES = {
     "friendly_short",
@@ -163,7 +163,7 @@ def validate_stt_provider(value: str | None) -> str | None:
 
     cleaned = value.strip().lower()
     if cleaned not in ALLOWED_STT_PROVIDERS:
-        raise ValueError("voice_stt_provider must be openai or clova")
+        raise ValueError("voice_stt_provider must be openai, clova, or deepgram")
     return cleaned
 
 

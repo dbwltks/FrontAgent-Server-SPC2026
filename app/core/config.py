@@ -18,9 +18,10 @@ class Settings(BaseSettings):
     openai_realtime_model: str = "gpt-realtime-2"
     openai_realtime_voice: str = "marin"
     voice_mode: str = "pipeline"
-    # STT provider 선택: "openai" | "clova". org 설정(voice_stt_provider)으로 덮어쓸 수 있다.
+    # STT provider 선택: "openai" | "clova" | "deepgram". org 설정(voice_stt_provider)으로 덮어쓸 수 있다.
     stt_provider: str = "openai"
     voice_stt_model: str = "gpt-4o-mini-transcribe"
+    deepgram_stt_model: str = "nova-3"
     voice_tts_model: str = "gpt-4o-mini-tts"
     voice_tts_voice: str = "marin"
     voice_upload_max_bytes: int = 10 * 1024 * 1024
@@ -48,6 +49,9 @@ class Settings(BaseSettings):
     clova_speech_api_secret: str = ""
     clova_speech_streaming_api_url: str = ""
     clova_speech_streaming_api_secret: str = ""
+
+    # STT (Deepgram) — org/provider 연동 전 .env 보관용
+    deepgram_api_key: str = ""
 
     class Config:
         env_file = ".env"

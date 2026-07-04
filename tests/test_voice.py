@@ -1,6 +1,8 @@
+import asyncio
+import json
 import unittest
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import io
 import wave
@@ -21,10 +23,14 @@ from app.api.voice import (
     normalize_text_for_korean_speech,
     resolve_elevenlabs_agent_id,
     resolve_realtime_provider,
-    resolve_tts_config,
-    split_tts_segments,
-    tts_log_fields,
     voice_config,
+)
+from app.services.voice_korean_text import split_tts_segments
+from app.services.voice_tts import (
+    ELEVENLABS_WS_CHUNK_LENGTH_SCHEDULE,
+    ElevenLabsWebSocketTTS,
+    resolve_tts_config,
+    tts_log_fields,
 )
 
 
@@ -249,6 +255,47 @@ class TtsProviderTests(unittest.TestCase):
         self.assertEqual(reader.getframerate(), ELEVENLABS_PCM_RATE)
         self.assertEqual(reader.getnchannels(), 1)
         self.assertEqual(reader.getsampwidth(), 2)
+
+
+class ElevenLabsWebSocketTtsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initialize_connection_uses_official_generation_config(self):
+        ws = ElevenLabsWebSocketTTS({"elevenlabs_voice_id": "voice_123"})
+        mock_ws = AsyncMock()
+        ws._ws = mock_ws
+
+        await ws._send_payload({
+            "text": " ",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+            "generation_config": {
+                "chunk_length_schedule": ELEVENLABS_WS_CHUNK_LENGTH_SCHEDULE,
+            },
+        })
+
+        payload = json.loads(mock_ws.send.await_args.args[0])
+        self.assertEqual(payload["generation_config"]["chunk_length_schedule"], [120, 160, 250, 290])
+        self.assertNotIn("try_trigger_generation", payload)
+
+    async def test_send_text_streams_without_try_trigger_generation(self):
+        ws = ElevenLabsWebSocketTTS({"elevenlabs_voice_id": "voice_123"})
+        mock_ws = AsyncMock()
+        ws._ws = mock_ws
+
+        await ws.send_text("안녕하세요.")
+
+        payload = json.loads(mock_ws.send.await_args.args[0])
+        self.assertEqual(payload["text"], "안녕하세요. ")
+        self.assertNotIn("try_trigger_generation", payload)
+
+    async def test_flush_includes_text_and_flush_flag(self):
+        ws = ElevenLabsWebSocketTTS({"elevenlabs_voice_id": "voice_123"})
+        mock_ws = AsyncMock()
+        ws._ws = mock_ws
+
+        await ws.flush("마지막 문장입니다")
+
+        payload = json.loads(mock_ws.send.await_args.args[0])
+        self.assertEqual(payload["text"], "마지막 문장입니다 ")
+        self.assertTrue(payload["flush"])
 
 
 if __name__ == "__main__":
