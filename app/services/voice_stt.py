@@ -8,7 +8,6 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
-DEEPGRAM_LISTEN_URL = "https://api.deepgram.com/v1/listen"
 CLOVA_SPEECH_LANG = "Kor"
 
 SUPPORTED_TRANSCRIPTION_UPLOADS = {
@@ -39,21 +38,6 @@ def normalize_transcription_upload(content_type: str | None) -> tuple[str, str]:
         normalized,
         ("utterance.webm", "audio/webm"),
     )
-
-
-def resolve_stt_model(provider: str | None, model: str | None) -> str:
-    normalized_provider = (provider or "openai").strip().lower()
-
-    if normalized_provider == "deepgram":
-        cleaned = (model or "").strip()
-        if cleaned.startswith("nova"):
-            return cleaned
-        return settings.deepgram_stt_model
-
-    if normalized_provider == "clova":
-        return "clova-speech"
-
-    return (model or settings.voice_stt_model).strip()
 
 
 async def read_audio_upload(audio: UploadFile) -> bytes:
@@ -96,64 +80,6 @@ async def _transcribe_clova(content: bytes) -> str:
     return str(response.json().get("text", "")).strip()
 
 
-async def _transcribe_deepgram(
-    content: bytes,
-    *,
-    content_type: str,
-    model: str,
-) -> str:
-    if not settings.deepgram_api_key:
-        logger.error("Deepgram API key is not configured")
-        raise HTTPException(status_code=500, detail="Deepgram is not configured")
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                DEEPGRAM_LISTEN_URL,
-                params={
-                    "model": model,
-                    "language": "ko",
-                    "punctuate": "true",
-                    "smart_format": "true",
-                },
-                headers={
-                    "Authorization": f"Token {settings.deepgram_api_key}",
-                    "Content-Type": content_type,
-                },
-                content=content,
-            )
-    except httpx.HTTPError:
-        logger.exception("Deepgram transcription request failed")
-        raise HTTPException(status_code=502, detail="Voice transcription failed")
-
-    if not response.is_success:
-        logger.error(
-            "Deepgram transcription rejected request: status=%s model=%s content_type=%s bytes=%s body=%s",
-            response.status_code,
-            model,
-            content_type,
-            len(content),
-            response.text[:1000],
-        )
-        if response.status_code == 400:
-            raise HTTPException(
-                status_code=422,
-                detail="Uploaded audio could not be processed",
-            )
-        raise HTTPException(status_code=502, detail="Voice transcription failed")
-
-    payload = response.json()
-    channels = (payload.get("results") or {}).get("channels") or []
-    if not channels:
-        return ""
-
-    alternatives = channels[0].get("alternatives") or []
-    if not alternatives:
-        return ""
-
-    return str(alternatives[0].get("transcript", "")).strip()
-
-
 async def transcribe_audio_content(
     *,
     content: bytes,
@@ -163,7 +89,6 @@ async def transcribe_audio_content(
     provider: str = "openai",
 ) -> tuple[str, dict]:
     upload_filename, upload_content_type = normalize_transcription_upload(content_type)
-    resolved_model = resolve_stt_model(provider, model)
     logger.info(
         "transcription upload received: filename=%s content_type=%s normalized_filename=%s normalized_content_type=%s bytes=%s model=%s provider=%s",
         filename,
@@ -171,7 +96,7 @@ async def transcribe_audio_content(
         upload_filename,
         upload_content_type,
         len(content),
-        resolved_model,
+        model,
         provider,
     )
 
@@ -180,21 +105,10 @@ async def transcribe_audio_content(
         "content_type": content_type,
         "normalized_filename": upload_filename,
         "normalized_content_type": upload_content_type,
-        "resolved_model": resolved_model,
     }
 
     if provider == "clova":
         text = await _transcribe_clova(content)
-        if not text:
-            raise HTTPException(status_code=422, detail="No speech was detected")
-        return text, metadata
-
-    if provider == "deepgram":
-        text = await _transcribe_deepgram(
-            content,
-            content_type=upload_content_type,
-            model=resolved_model,
-        )
         if not text:
             raise HTTPException(status_code=422, detail="No speech was detected")
         return text, metadata
@@ -205,7 +119,7 @@ async def transcribe_audio_content(
                 OPENAI_TRANSCRIPTIONS_URL,
                 headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                 data={
-                    "model": resolved_model,
+                    "model": model,
                     "language": "ko",
                     "response_format": "json",
                 },
