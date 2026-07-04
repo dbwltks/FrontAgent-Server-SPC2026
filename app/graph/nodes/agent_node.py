@@ -188,6 +188,49 @@ def _match_service_item_in_text(text: str, service_items: list[dict]) -> dict | 
     # 여러 개가 동시에 잡히면 잘못된 자동 선택을 막기 위해 보류
     return None
 
+def _normalize_phone_text(value: str | None) -> str | None:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits if len(digits) >= 10 and digits.startswith("01") else None
+
+
+def _looks_like_phone_only_message(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+
+    phone = _normalize_phone_text(text)
+    if not phone:
+        return False
+
+    # 전화번호만 입력한 경우만 처리
+    text_without_phone_chars = re.sub(r"[\d\s\-().+]", "", text)
+    return not text_without_phone_chars
+
+
+def _last_assistant_asked_reservation_lookup_phone(
+    conversation_history: list[dict],
+) -> bool:
+    for message in reversed(conversation_history[-6:]):
+        if message.get("role") != "assistant":
+            continue
+
+        content = str(message.get("content") or "")
+        if not content:
+            return False
+
+        return (
+            "예약" in content
+            and ("전화번호" in content or "번호" in content)
+            and (
+                "조회" in content
+                or "찾지 못" in content
+                or "확인" in content
+                or "다시" in content
+            )
+        )
+
+    return False
+
 
 def _find_recent_service_item_context(
     *,
@@ -1000,6 +1043,27 @@ async def agent_node(state: AgentState) -> dict:
     pending_task_prompt = _resolve_pending_task_prompt(state)
 
     rules = await asyncio.to_thread(get_active_rules, organization_id)
+
+    if (
+        not has_active_task
+        and _looks_like_phone_only_message(user_message)
+        and _last_assistant_asked_reservation_lookup_phone(conversation_history)
+    ):
+        phone = _normalize_phone_text(user_message)
+
+        return await _execute_run_task_turn(
+            organization_id=organization_id,
+            session_id=session_id,
+            user_message=user_message,
+            task_type="reservation_lookup",
+            writer=writer,
+            rules=rules,
+            initial_variables={
+                "customer_phone": phone,
+                "phone": phone,
+            },
+        )
+
 
     voice_response_style = "friendly_short"
     if channel in {"web_call", "voice"}:
