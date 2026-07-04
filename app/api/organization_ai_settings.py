@@ -30,6 +30,13 @@ STT_MODELS_BY_PROVIDER = {
     # CLOVA Speech는 모델 파라미터가 없어 provider 자체가 엔진이지만,
     # 프론트 드롭다운이 빈 목록을 받지 않도록 단일 옵션으로 표시한다.
     "clova": ["clova-speech"],
+    "deepgram": [
+        "nova-3",
+        "nova-3-general",
+        "nova-2",
+        "nova-2-general",
+        "nova-2-conversationalai",
+    ],
 }
 
 TTS_MODELS_BY_PROVIDER = {
@@ -210,6 +217,16 @@ def get_organization_ai_settings(organization_id: str):
                     "name": "CLOVA Speech (한국어 STT)",
                     "voice_mode": "pipeline",
                     "voice_stt_provider": "clova",
+                    "voice_tts_provider": "openai",
+                    "voice_tts_model": "gpt-4o-mini-tts",
+                    "voice_tts_voice": "marin",
+                    "voice_response_style": "friendly_short",
+                },
+                {
+                    "name": "Deepgram Nova (한국어 STT)",
+                    "voice_mode": "pipeline",
+                    "voice_stt_provider": "deepgram",
+                    "voice_stt_model": "nova-3",
                     "voice_tts_provider": "openai",
                     "voice_tts_model": "gpt-4o-mini-tts",
                     "voice_tts_voice": "marin",

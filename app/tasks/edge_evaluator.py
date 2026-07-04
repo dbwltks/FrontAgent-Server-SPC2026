@@ -85,19 +85,51 @@ def _evaluate_single(expression: str, variables: dict[str, Any]) -> bool:
     return bool(get_value_by_path(variables, normalized))
 
 
+def _split_top_level(expression: str, operator: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    token = f" {operator} "
+    i = 0
+    while i < len(expression):
+        ch = expression[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and expression.startswith(token, i):
+            parts.append(expression[start:i].strip())
+            i += len(token)
+            start = i
+            continue
+        i += 1
+    parts.append(expression[start:].strip())
+    return [part for part in parts if part]
+
+
 def evaluate_condition_expression(expression: str | None, variables: dict[str, Any]) -> bool:
     if not expression or not expression.strip():
         return True
 
-    # && 로 연결된 복합 조건: 전부 True여야 True
-    if "&&" in expression:
-        return all(_evaluate_single(part, variables) for part in expression.split("&&"))
+    normalized = expression.strip()
+    if normalized.startswith("(") and normalized.endswith(")"):
+        normalized = normalized[1:-1].strip()
 
-    # || 로 연결된 복합 조건: 하나라도 True면 True
-    if "||" in expression:
-        return any(_evaluate_single(part, variables) for part in expression.split("||"))
+    # && 로 연결된 복합 조건: 괄호 안의 && 는 분리하지 않는다.
+    if "&&" in normalized:
+        return all(
+            evaluate_condition_expression(part, variables)
+            for part in _split_top_level(normalized, "&&")
+        )
 
-    return _evaluate_single(expression, variables)
+    # || 로 연결된 복합 조건: 괄호 안의 || 는 분리하지 않는다.
+    if "||" in normalized:
+        return any(
+            evaluate_condition_expression(part, variables)
+            for part in _split_top_level(normalized, "||")
+        )
+
+    return _evaluate_single(normalized, variables)
 
 
 def evaluate_edge_condition(

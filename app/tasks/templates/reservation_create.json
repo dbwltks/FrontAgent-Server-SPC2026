@@ -110,59 +110,6 @@
       "retry_limit": 0
     },
     {
-      "node_key": "ask_date",
-      "node_type": "instruction",
-      "label": "예약 날짜/시간 질문",
-      "config": {
-        "instruction": "[역할]\n고객의 예약 요청에서 필요한 정보를 한 번에 최대한 많이 추출하는 에이전트다. 고객이 여러 정보를 한 메시지에 동시에 말하면 전부 추출해서 저장한다.\n\n[담당 슬롯]\n- 이 노드의 메인 슬롯은 reservation_date, reservation_time, customer_phone(연락처) 세 가지다.\n\n[대화 흐름]\n- memory에 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_date\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_time\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>이 모두 이미 있으면 다시 묻지 않고 즉시 종료한다(message는 null).\n- 없는 슬롯만 자연스럽게 질문한다. 여러 개가 없으면 한 번에 같이 물어봐도 된다. 예: \"원하시는 예약 날짜와 시간, 그리고 연락 가능한 번호를 알려주세요.\"\n- 고객이 한 번에 여러 슬롯을 같이 말하면 전부 추출해서 저장한다.\n\n[종료 조건]\n- reservation_date, reservation_time, customer_phone이 모두 확인되면(원래 있었거나 이번에 추출했거나) 종료한다.\n\n[예외 사항]\n- \"내일\", \"모레\", \"다음 주 토요일\"처럼 상대적인 날짜 표현이면 현재 날짜를 기준으로 YYYY-MM-DD 절대 날짜로 변환해서 저장한다.\n- \"오후 3시\", \"저녁 7시반\"처럼 표현해도 24시간 HH:MM 형식으로 변환해서 저장한다.\n- 연락처는 숫자와 하이픈만 남기고 정리해서 저장한다(예: \"010-1234-5678\").\n- 그 외 답변이 모호하면 값을 추측하지 말고 다시 질문한다.",
-        "next_step_mode": "branch",
-        "save_to_memory": true,
-        "branch_node_key": "check_availability",
-        "branch_condition": "memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null",
-        "fallback_node_key": "fail_end"
-      },
-      "code": null,
-      "position_x": 1360,
-      "position_y": 640,
-      "timeout_seconds": 10,
-      "retry_limit": 0
-    },
-    {
-      "node_key": "ask_name",
-      "node_type": "instruction",
-      "label": "성함 질문",
-      "config": {
-        "instruction": "[역할]\n고객의 예약 요청에서 필요한 정보를 한 번에 최대한 많이 추출하는 에이전트다. 고객이 여러 정보를 한 메시지에 동시에 말하면 전부 추출해서 저장한다.\n\n[담당 슬롯]\n- customer_name(성함), reservation_date(예약 날짜), reservation_time(예약 시간), customer_phone(연락처)\n\n[대화 흐름]\n- memory에 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_name\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_date\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_time\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>이 모두 이미 있으면 다시 묻지 않고 즉시 종료한다(message는 null).\n- 없는 슬롯만 자연스럽게 질문한다. 첫 질문은 성함부터 시작한다.\n- 고객이 한 번에 여러 슬롯을 같이 말하면 전부 추출해서 저장한다.\n- 이미 memory에 있는 값은 덮어쓰지 않는다.\n\n[종료 조건]\n- customer_name, reservation_date, reservation_time, customer_phone이 모두 확인되면 종료한다.\n\n[예외 사항]\n- 이름을 명확하게 들었으면 바로 확정한다.\n- \"내일\", \"모레\"처럼 상대적인 날짜 표현은 현재 날짜 기준 절대 날짜(YYYY-MM-DD)로 변환해서 저장한다.\n- \"오후 3시\", \"저녁 7시반\"처럼 표현된 시간은 24시간 HH:MM 형식으로 변환해서 저장한다.\n- 연락처는 숫자와 하이픈만 남기고 정리해서 저장한다(예: \"010-1234-5678\").\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.",
-        "next_step_mode": "branch",
-        "branch_node_key": "check_availability",
-        "branch_condition": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null",
-        "fallback_node_key": "ask_name"
-      },
-      "code": null,
-      "position_x": 1360,
-      "position_y": 960,
-      "timeout_seconds": 10,
-      "retry_limit": 0
-    },
-    {
-      "node_key": "ask_party_size",
-      "node_type": "instruction",
-      "label": "인원수 질문",
-      "config": {
-        "instruction": "[역할]\n고객의 예약 요청에서 필요한 정보를 한 번에 최대한 많이 추출하는 에이전트다. 고객이 여러 정보를 한 메시지에 동시에 말하면 전부 추출해서 저장한다.\n\n[담당 슬롯]\n- 이 노드의 메인 슬롯은 party_size다.\n\n[대화 흐름]\n- memory에 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"party_size\"></promptdata>가 이미 있으면 다시 묻지 않고 즉시 종료한다(message는 null).\n- 없으면 예약 인원이 몇 명인지 질문한다.\n- 고객 메시지에 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_date\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_time\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata> 정보도 함께 들어있으면 같이 추출해서 저장한다. 단, 이미 memory에 있는 값은 덮어쓰지 않는다.\n\n[종료 조건]\n- party_size가 확인되면(원래 있었거나 이번에 추출했거나) 종료한다.\n\n[예외 사항]\n- 답변이 모호하면 party_size는 추측하지 말고 다시 질문한다.\n- \"내일\", \"모레\"처럼 상대적인 날짜 표현은 현재 날짜 기준 절대 날짜(YYYY-MM-DD)로, \"오후 3시\"처럼 표현된 시간은 24시간 HH:MM 형식으로 변환해서 저장한다.\n- 연락처는 숫자와 하이픈만 남기고 정리해서 저장한다.",
-        "next_step_mode": "branch",
-        "save_to_memory": true,
-        "branch_node_key": "ask_name",
-        "branch_condition": "memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true",
-        "fallback_node_key": "ask_party_size"
-      },
-      "code": null,
-      "position_x": 3520,
-      "position_y": 640,
-      "timeout_seconds": 10,
-      "retry_limit": 0
-    },
-    {
       "node_key": "start",
       "node_type": "function",
       "label": "서비스 목록 조회",
@@ -223,7 +170,7 @@
         },
         "save_as": "service_item_resolve_result",
         "function_name": "reservation.resolve_service_item",
-        "next_node_key": "ask_party_size",
+        "next_node_key": "ask_reservation_details",
         "next_step_mode": "single",
         "memory_mappings": {
           "service_item_id": "service_item_id",
@@ -233,6 +180,24 @@
       "code": null,
       "position_x": 1360,
       "position_y": 280,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "ask_reservation_details",
+      "node_type": "instruction",
+      "label": "예약 정보 수집",
+      "config": {
+        "instruction": "[역할]\n예약 접수에 필요한 고객 정보를 수집한다. Current Memory에 이미 있는 값은 절대 다시 묻지 않는다.\n\n[담당 슬롯]\n- customer_name (성함)\n- reservation_date (예약 날짜, YYYY-MM-DD)\n- reservation_time (예약 시간, HH:MM 24시간)\n- customer_phone (연락처)\n- party_size (인원수): <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"service_item_resolve_result.service_item.raw_payload.requires_party_size\"></promptdata> 가 true일 때만 수집\n\n[대화 흐름]\n- memory에 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_name\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_date\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"reservation_time\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"customer_phone\"></promptdata>, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"party_size\"></promptdata> 중 이번에 필요한 값이 모두 있으면 다시 묻지 않고 즉시 종료한다(message는 null).\n- 비어 있는 슬롯만 질문한다. 여러 슬롯이 비어 있으면 한 번에 같이 물어봐도 된다. 예: \"성함과 연락처, 원하시는 예약 날짜와 시간을 알려주세요.\"\n- 성함→날짜→시간→연락처처럼 한 항목씩만 순서대로 묻지 않는다. memory에 이미 있는 항목은 건너뛴다.\n- 고객이 한 메시지에 여러 정보를 말하면 전부 추출해서 저장한다.\n- 이미 memory에 있는 값은 덮어쓰지 않는다.\n\n[날짜+시간 동시 입력]\n- \"7월2일 14시\", \"7월 2일 14시요\", \"내일 오후 3시\"처럼 한 메시지에 날짜와 시간이 함께 있으면 reservation_date와 reservation_time을 memory_updates에 동시에 모두 넣는다.\n- 날짜만 저장하고 시간을 빠뜨리지 않는다. reservation_time이 이미 채워졌으면 시간을 다시 묻지 않는다.\n\n[종료 조건]\n- customer_name, reservation_date, reservation_time, customer_phone이 모두 확인되면 종료한다.\n- requires_party_size가 true이면 party_size도 확인된 뒤 종료한다.\n\n[예외 사항]\n- \"내일\", \"모레\"처럼 상대적인 날짜 표현은 현재 날짜 기준 YYYY-MM-DD로 변환해서 저장한다.\n- \"오후 3시\", \"14시\", \"저녁 7시반\"처럼 표현된 시간은 24시간 HH:MM 형식으로 변환해서 저장한다.\n- 연락처는 숫자와 하이픈만 남기고 정리해서 저장한다(예: \"010-1234-5678\").\n- requires_party_size가 false이면 party_size는 묻지 않는다.\n- 답변이 모호하면 값을 추측하지 말고 다시 질문한다.",
+        "next_step_mode": "branch",
+        "save_to_memory": true,
+        "branch_node_key": "check_availability",
+        "branch_condition": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null && (memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true || memory.party_size != null)",
+        "fallback_node_key": "ask_reservation_details"
+      },
+      "code": null,
+      "position_x": 1360,
+      "position_y": 800,
       "timeout_seconds": 10,
       "retry_limit": 0
     }
@@ -253,37 +218,6 @@
       "edge_type": "single",
       "condition_type": "always",
       "condition_config": {},
-      "is_failure_edge": false,
-      "priority": 100
-    },
-    {
-      "source_node_key": "resolve_service_item",
-      "target_node_key": "ask_party_size",
-      "edge_type": "single",
-      "condition_type": "always",
-      "condition_config": {},
-      "is_failure_edge": false,
-      "priority": 100
-    },
-    {
-      "source_node_key": "ask_party_size",
-      "target_node_key": "ask_name",
-      "edge_type": "single",
-      "condition_type": "always",
-      "condition_config": {
-        "expression": "memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true"
-      },
-      "is_failure_edge": false,
-      "priority": 100
-    },
-    {
-      "source_node_key": "ask_name",
-      "target_node_key": "check_availability",
-      "edge_type": "single",
-      "condition_type": "always",
-      "condition_config": {
-        "expression": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null"
-      },
       "is_failure_edge": false,
       "priority": 100
     },
@@ -326,47 +260,12 @@
       "priority": 100
     },
     {
-      "source_node_key": "ask_date",
-      "target_node_key": "check_availability",
-      "edge_type": "single",
-      "condition_type": "always",
-      "condition_config": {
-        "expression": "memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null"
-      },
-      "is_failure_edge": false,
-      "priority": 100
-    },
-    {
-      "source_node_key": "ask_party_size",
-      "target_node_key": "ask_party_size",
-      "edge_type": "fallback",
-      "condition_type": "fallback",
-      "condition_config": {
-        "fallback": true,
-        "expression": "memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true"
-      },
-      "is_failure_edge": true,
-      "priority": 200
-    },
-    {
       "source_node_key": "create_reservation",
       "target_node_key": "ask_new_time",
       "edge_type": "fallback",
       "condition_type": "fallback",
       "condition_config": {
         "fallback": true
-      },
-      "is_failure_edge": true,
-      "priority": 200
-    },
-    {
-      "source_node_key": "ask_date",
-      "target_node_key": "fail_end",
-      "edge_type": "fallback",
-      "condition_type": "fallback",
-      "condition_config": {
-        "fallback": true,
-        "expression": "memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null"
       },
       "is_failure_edge": true,
       "priority": 200
@@ -383,13 +282,33 @@
       "priority": 200
     },
     {
-      "source_node_key": "ask_name",
-      "target_node_key": "ask_name",
+      "source_node_key": "resolve_service_item",
+      "target_node_key": "ask_reservation_details",
+      "edge_type": "single",
+      "condition_type": "always",
+      "condition_config": {},
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "ask_reservation_details",
+      "target_node_key": "check_availability",
+      "edge_type": "single",
+      "condition_type": "always",
+      "condition_config": {
+        "expression": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null && (memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true || memory.party_size != null)"
+      },
+      "is_failure_edge": false,
+      "priority": 100
+    },
+    {
+      "source_node_key": "ask_reservation_details",
+      "target_node_key": "ask_reservation_details",
       "edge_type": "fallback",
       "condition_type": "fallback",
       "condition_config": {
         "fallback": true,
-        "expression": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null"
+        "expression": "memory.customer_name != null && memory.customer_name != \"\" && memory.reservation_date != null && memory.reservation_time != null && memory.customer_phone != null && (memory.service_item_resolve_result.service_item.raw_payload.requires_party_size != true || memory.party_size != null)"
       },
       "is_failure_edge": true,
       "priority": 200
