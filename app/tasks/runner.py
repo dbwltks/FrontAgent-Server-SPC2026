@@ -3,6 +3,7 @@ from typing import Any, Callable
 from app.tasks.edge_evaluator import evaluate_condition_expression, select_failure_edge, select_next_edge
 from app.tasks.executors import EXECUTOR_MAP
 from app.tasks.memory import TaskMemory
+from app.repositories.service_repo import list_service_items
 from app.tasks.repository import TaskRepository
 from app.tasks.types import ExecutorResult, TaskRunResponse, normalize_task_error
 
@@ -18,6 +19,7 @@ class DynamicTaskRunner:
         user_message: str,
         flow_id: str | None = None,
         on_trace: Callable[[dict[str, Any]], None] | None = None,
+        initial_variables: dict[str, Any] | None = None,
     ) -> TaskRunResponse:
         """
         MVP 2단계 기준 실행 방식.
@@ -48,6 +50,7 @@ class DynamicTaskRunner:
                 organization_id=organization_id,
                 session_id=session_id,
                 flow_id=flow_id,
+                initial_variables=initial_variables,
             )
 
         return await self._run_session(
@@ -62,6 +65,7 @@ class DynamicTaskRunner:
         organization_id: str,
         session_id: str,
         flow_id: str,
+        initial_variables: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         flow = self.repository.get_flow(flow_id)
         if not flow:
@@ -79,7 +83,7 @@ class DynamicTaskRunner:
             session_id=session_id,
             flow_id=flow_id,
             current_node_key=start_node["node_key"],
-            variables={},
+            variables=initial_variables or {},
         )
 
     async def _run_session(

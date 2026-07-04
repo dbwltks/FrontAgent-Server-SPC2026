@@ -32,6 +32,7 @@ from app.rag.keyword_vocabulary import get_organization_keyword_vocabulary
 from app.rag.query_matching import looks_like_question, term_appears_in_text
 from app.rag.retriever import retrieve_knowledge, summarize_knowledge_chunk
 from app.repositories.rule_repo import get_active_rules
+from app.repositories.service_repo import list_service_items
 from app.tasks.repository import TaskRepository
 from app.tasks.runner import DynamicTaskRunner
 from app.tasks.service_selection import build_service_selection_message
@@ -161,6 +162,113 @@ KNOWLEDGE_AMBIGUITY_GAP_THRESHOLD = 0.05
 
 def _normalize_service_label(text: str) -> str:
     return re.sub(r"[\s?!.,·]+", "", text.lower())
+
+def _match_service_item_in_text(text: str, service_items: list[dict]) -> dict | None:
+    normalized_text = _normalize_service_label(text)
+    if not normalized_text:
+        return None
+
+    matches: list[dict] = []
+
+    for item in service_items:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+
+        normalized_name = _normalize_service_label(name)
+        if len(normalized_name) < 3:
+            continue
+
+        if normalized_name in normalized_text:
+            matches.append(item)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    # 여러 개가 동시에 잡히면 잘못된 자동 선택을 막기 위해 보류
+    return None
+
+
+def _find_recent_service_item_context(
+    *,
+    organization_id: str,
+    user_message: str,
+    conversation_history: list[dict],
+) -> dict:
+    """
+    최근 대화에서 언급된 예약 서비스 아이템을 찾는다.
+
+    하드코딩하지 않고 service_items DB 목록 기준으로 매칭한다.
+    예: "입주 청소가 뭐야" → service_items.name = "입주 청소" 매칭
+    """
+    try:
+        service_items = list_service_items(organization_id=organization_id)
+    except Exception:
+        logger.exception("Failed to load service items for context bridge")
+        return {}
+
+    if not service_items:
+        return {}
+
+    # 1순위: 이번 사용자 메시지
+    current_match = _match_service_item_in_text(user_message, service_items)
+    if current_match:
+        return {
+            "service_id": current_match.get("service_id"),
+            "service_item_id": current_match.get("id"),
+            "service_item_name": current_match.get("name"),
+            "source": "current_user_message",
+        }
+
+    # 2순위: 최근 사용자 메시지
+    # assistant가 서비스 목록을 나열한 문장은 여러 서비스가 동시에 잡힐 수 있어서 제외
+    for message in reversed(conversation_history[-8:]):
+        if message.get("role") != "user":
+            continue
+
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+
+        match = _match_service_item_in_text(content, service_items)
+        if match:
+            return {
+                "service_id": match.get("service_id"),
+                "service_item_id": match.get("id"),
+                "service_item_name": match.get("name"),
+                "source": "recent_user_message",
+            }
+
+    return {}
+
+
+def _build_initial_task_variables_from_context(
+    *,
+    organization_id: str,
+    user_message: str,
+    conversation_history: list[dict],
+) -> dict:
+    service_context = _find_recent_service_item_context(
+        organization_id=organization_id,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    )
+
+    if not service_context.get("service_item_id"):
+        return {}
+
+    service_item_name = service_context.get("service_item_name")
+
+    return {
+        "service_id": service_context.get("service_id"),
+        "service_item_id": service_context.get("service_item_id"),
+        "service_item_name": service_item_name,
+        "service_item_text": service_item_name,
+        "context_bridge": {
+            "type": "recent_service_item",
+            "source": service_context.get("source"),
+        },
+    }
 
 
 def _extract_service_item_names(chunks: list[dict], limit: int = 3) -> list[str]:
@@ -712,6 +820,7 @@ async def _execute_run_task_turn(
     rules: list[dict] | None = None,
     emit_delta: bool = True,
     flow_id: str | None = None,
+    initial_variables: dict | None = None,
 ) -> dict:
     task_result = await _run_task(
         organization_id,
@@ -719,6 +828,7 @@ async def _execute_run_task_turn(
         user_message,
         task_type,
         flow_id=flow_id,
+        initial_variables=initial_variables,
     )
 
     direct_message = _build_service_selection_message(task_result) or (task_result.get("message") or "").strip()
@@ -763,6 +873,7 @@ async def _run_task(
     task_type: str,
     *,
     flow_id: str | None = None,
+    initial_variables: dict | None = None,
 ) -> dict:
     repository = TaskRepository()
     runner = DynamicTaskRunner(repository=repository)
@@ -782,6 +893,7 @@ async def _run_task(
         session_id=session_id,
         user_message=user_message,
         flow_id=resolved_flow_id if active_session is None else None,
+        initial_variables=initial_variables if active_session is None else None,
         on_trace=lambda item: writer({"type": "task_step", "step": item}),
     )
 
@@ -985,14 +1097,21 @@ async def agent_node(state: AgentState) -> dict:
                     "score": trigger_match.score,
                 }
             )
+            initial_variables = _build_initial_task_variables_from_context(
+                organization_id=organization_id,
+                user_message=user_message,
+                conversation_history=conversation_history,
+            )
+
             return await _execute_run_task_turn(
                 organization_id=organization_id,
                 session_id=session_id,
                 user_message=user_message,
                 task_type=trigger_match.task_type,
-                flow_id=trigger_match.flow_id,
                 writer=writer,
                 rules=rules,
+                flow_id=trigger_match.flow_id,
+                initial_variables=initial_variables,
             )
 
     response_instructions = build_response_instructions(
@@ -1103,6 +1222,15 @@ async def agent_node(state: AgentState) -> dict:
             task_result=state.get("task_result"),
         )
     elif tool_name == "run_task":
+        initial_variables = {}
+
+        if not has_active_task:
+            initial_variables = _build_initial_task_variables_from_context(
+                organization_id=organization_id,
+                user_message=user_message,
+                conversation_history=conversation_history,
+            )
+
         return await _execute_run_task_turn(
             organization_id=organization_id,
             session_id=session_id,
@@ -1110,6 +1238,7 @@ async def agent_node(state: AgentState) -> dict:
             task_type=tool_args.get("task_type", "reservation_create"),
             writer=writer,
             rules=rules,
+            initial_variables=initial_variables,
         )
     # tool_name == "request_handoff"
     return _build_handoff_state(rules=rules)
