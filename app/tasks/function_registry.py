@@ -112,6 +112,10 @@ def _get_value(
 
     return default
 
+def _normalize_phone(value: Any) -> str | None:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits or None
+
 
 def _parse_date_value(value: Any) -> date:
     if isinstance(value, datetime):
@@ -1136,7 +1140,9 @@ def reservation_create_reservation(
     )
 
     customer_name = _get_value(params, variables, "customer_name", "name")
-    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    customer_phone = _normalize_phone(
+        _get_value(params, variables, "customer_phone", "phone")
+    )
     customer_email = _get_value(params, variables, "customer_email", "email")
 
     source_channel = _get_value(
@@ -1218,7 +1224,9 @@ def reservation_list_reservations(
     variables: dict[str, Any],
 ) -> dict[str, Any]:
     organization_id = _get_value(params, variables, "organization_id")
-    customer_phone = _get_value(params, variables, "customer_phone", "phone")
+    customer_phone = _normalize_phone(
+        _get_value(params, variables, "customer_phone", "phone")
+    )
     status_value = _get_value(params, variables, "status")
     limit_value = _get_value(params, variables, "limit", default=10)
 
