@@ -11,6 +11,7 @@ import threading
 from app.core.db import supabase
 from app.providers.embedding_provider import create_embedding
 from app.rag.indexer import extract_keywords, prepare_keywords_for_hybrid_rpc
+from app.rag.query_matching import keyword_hits_in_content
 from app.rag.keyword_vocabulary import get_organization_keyword_vocabulary
 
 
@@ -37,9 +38,19 @@ MIN_KEYWORD_HITS_FOR_HYBRID = 2
 SEMANTIC_CACHE_THRESHOLD = 0.93
 
 
-def _keyword_hits_in_content(content: str, query_keywords: list[str]) -> int:
-    lowered = content.lower()
-    return sum(1 for keyword in query_keywords if len(keyword) >= 2 and keyword.lower() in lowered)
+def _keyword_hits_in_content(
+    content: str,
+    query_keywords: list[str],
+    *,
+    chunk_keywords: list[str] | None = None,
+    vocabulary=None,
+) -> int:
+    return keyword_hits_in_content(
+        content,
+        query_keywords,
+        chunk_keywords=chunk_keywords,
+        vocabulary=vocabulary,
+    )
 
 
 def _required_keyword_hits(query_keywords: list[str]) -> int:
@@ -53,13 +64,19 @@ def _passes_retrieval_threshold(
     query_keywords: list[str],
     *,
     used_hybrid: bool,
+    vocabulary=None,
 ) -> bool:
     similarity = row.get("similarity", 0)
     if used_hybrid:
         if similarity < HYBRID_SIMILARITY_THRESHOLD:
             return False
         content = row.get("content") or ""
-        return _keyword_hits_in_content(content, query_keywords) >= _required_keyword_hits(query_keywords)
+        return _keyword_hits_in_content(
+            content,
+            query_keywords,
+            chunk_keywords=row.get("keywords"),
+            vocabulary=vocabulary,
+        ) >= _required_keyword_hits(query_keywords)
 
     return similarity >= VECTOR_SIMILARITY_THRESHOLD
 
@@ -76,6 +93,7 @@ async def _lookup_semantic_cache(
     query_embedding: list[float],
     folder_id: str | None,
     query_keywords: list[str] | None = None,
+    vocabulary=None,
 ) -> list[dict] | None:
     try:
         result = await asyncio.to_thread(
@@ -112,7 +130,12 @@ async def _lookup_semantic_cache(
     if query_keywords:
         top_chunk = cached_result[0]
         content = top_chunk.get("content") or ""
-        if _keyword_hits_in_content(content, query_keywords) < _required_keyword_hits(query_keywords):
+        if _keyword_hits_in_content(
+            content,
+            query_keywords,
+            chunk_keywords=top_chunk.get("keywords"),
+            vocabulary=vocabulary,
+        ) < _required_keyword_hits(query_keywords):
             return None
         if top_chunk.get("similarity", 0) < HYBRID_SIMILARITY_THRESHOLD:
             return None
@@ -159,17 +182,31 @@ async def retrieve_knowledge(
     # 임베딩 + 키워드를 병렬로 추출
     query_embedding = await create_embedding(query)
     vocabulary = get_organization_keyword_vocabulary(organization_id)
-    query_keywords = extract_keywords(query, max_keywords=10, vocabulary=vocabulary)
+    query_keywords = extract_keywords(
+        query,
+        max_keywords=10,
+        vocabulary=vocabulary,
+        for_query=True,
+    )
 
     cached_result = await _lookup_semantic_cache(
-        organization_id, query_embedding, folder_id, query_keywords
+        organization_id,
+        query_embedding,
+        folder_id,
+        query_keywords,
+        vocabulary,
     )
     if cached_result is not None:
         used_hybrid = bool(query_keywords)
         filtered_cache = [
             row
             for row in cached_result
-            if _passes_retrieval_threshold(row, query_keywords, used_hybrid=used_hybrid)
+            if _passes_retrieval_threshold(
+                row,
+                query_keywords,
+                used_hybrid=used_hybrid,
+                vocabulary=vocabulary,
+            )
         ]
         if filtered_cache:
             return filtered_cache[:match_count]
@@ -203,7 +240,12 @@ async def retrieve_knowledge(
     filtered_rows = [
         row
         for row in rows
-        if _passes_retrieval_threshold(row, query_keywords, used_hybrid=used_hybrid)
+        if _passes_retrieval_threshold(
+            row,
+            query_keywords,
+            used_hybrid=used_hybrid,
+            vocabulary=vocabulary,
+        )
     ]
 
     final_rows = filtered_rows[:match_count]
@@ -217,6 +259,58 @@ async def retrieve_knowledge(
 # 부족해 보이고, 너무 길면(실측 494자, chunk 여러 개를 그대로 이어붙인 경우)
 # 듣다가 맥락을 놓치거나 서로 다른 주제가 섞여 엉뚱한 답처럼 들린다.
 KNOWLEDGE_ANSWER_MAX_CHARS = 150
+
+_POLITE_SENTENCE_ENDINGS = ("요", "다", "니다", "세요", "까요", "?", "!", ".", "…")
+
+
+def _ensure_natural_korean_sentence(text: str) -> str:
+    text = re.sub(r"\s+", " ", text.strip())
+    if not text:
+        return text
+    if text.endswith(_POLITE_SENTENCE_ENDINGS):
+        return text
+    if re.search(r"\d+(?:,\d{3})*\s*원", text):
+        return f"{text}이에요."
+    return f"{text}예요."
+
+
+def _weave_service_name_into_answer(heading_name: str | None, plain_text: str) -> str:
+    text = re.sub(r"\s+", " ", (plain_text or "").strip())
+    if not text:
+        return (heading_name or "").strip()
+
+    if not heading_name:
+        return _ensure_natural_korean_sentence(text)
+
+    heading = heading_name.strip()
+    collapsed_heading = re.sub(r"\s+", "", heading.lower())
+    collapsed_text = re.sub(r"\s+", "", text.lower())
+
+    if collapsed_text.startswith(collapsed_heading):
+        return _ensure_natural_korean_sentence(text)
+
+    prefix_window = collapsed_text[: len(collapsed_heading) + 8]
+    if collapsed_heading in prefix_window:
+        return _ensure_natural_korean_sentence(text)
+
+    body = re.sub(r"^설명\s*:\s*", "", text).strip()
+    if body.endswith("."):
+        body = body[:-1].strip()
+
+    if re.search(r"(은|는|이|가)\s", body[: max(len(heading) + 2, 8)]):
+        return _ensure_natural_korean_sentence(body)
+
+    if re.search(r"(가격|요금|비용).*(원|\d)", body):
+        price_match = re.search(
+            r"기본\s*가격\s*:\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*원",
+            body,
+        )
+        if price_match:
+            amount = price_match.group(1)
+            return _ensure_natural_korean_sentence(f"{heading}는 기본 가격이 {amount}원")
+        return _ensure_natural_korean_sentence(f"{heading}는 {body}")
+
+    return _ensure_natural_korean_sentence(f"{heading}는 {body}")
 
 
 def summarize_knowledge_chunk(chunk: dict) -> str | None:
@@ -252,6 +346,8 @@ def summarize_knowledge_chunk(chunk: dict) -> str | None:
     # 파일 제목만 있는 첫 줄은 듣기/읽기에 부적합하므로 일반 문장으로 보이는
     # 줄만 남긴다(문장부호로 안 끝나는 5단어 이하 줄은 제목으로 간주).
     def _looks_like_heading(line: str) -> bool:
+        if re.search(r"(기본\s*가격|요금|소요\s*시간).*(원|분|\d)", line):
+            return False
         if re.match(r"^\d+[.)]\s*\S+$", line) and len(line.split()) <= 4:
             return True
         if not line.endswith((".", "!", "?", "다", "요", "임", "음")) and len(line.split()) <= 6:
@@ -267,12 +363,10 @@ def summarize_knowledge_chunk(chunk: dict) -> str | None:
     ]
     plain_text = " ".join(lines) if lines else re.sub(r"[#*\-]+", " ", content)
     plain_text = re.sub(r"\s+", " ", plain_text).strip()
-    # 본문 첫 줄이 "설명: ~"인 경우가 많아, heading_name과 합치면
-    # "이사 청소: 설명: ~"처럼 라벨이 중복된다 - "설명:" 라벨은 떼어낸다.
+    # 본문 첫 줄이 "설명: ~"인 경우가 많아 "설명:" 라벨은 떼어낸다.
     plain_text = re.sub(r"^설명\s*:\s*", "", plain_text)
 
-    if heading_name:
-        plain_text = f"{heading_name}: {plain_text}" if plain_text else heading_name
+    plain_text = _weave_service_name_into_answer(heading_name, plain_text)
 
     if len(plain_text) <= KNOWLEDGE_ANSWER_MAX_CHARS:
         return plain_text
