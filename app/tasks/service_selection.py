@@ -150,10 +150,21 @@ def try_fast_path_ask_service_instruction(
     """
     if node.get("node_key") != "ask_service":
         return None
+
+    variables = memory.to_dict()
+
+    # context bridge로 이미 서비스가 확정된 경우 ask_service를 건너뛴다.
+    if variables.get("service_item_id"):
+        return ExecutorResult(
+            status="success",
+            message=None,
+            memory_updates={},
+            next_behavior="evaluate_edges",
+        )
+
     if not user_message or not organization_id:
         return None
 
-    variables = memory.to_dict()
     if not (variables.get("available_services") or {}).get("services"):
         return None
 
@@ -164,11 +175,15 @@ def try_fast_path_ask_service_instruction(
         },
         variables=variables,
     )
+
     if resolve_result.get("resolved"):
         return ExecutorResult(
             status="success",
             message=None,
-            memory_updates=_memory_updates_from_resolve_result(resolve_result, user_message.strip()),
+            memory_updates=_memory_updates_from_resolve_result(
+                resolve_result,
+                user_message.strip(),
+            ),
             next_behavior="evaluate_edges",
         )
 
@@ -177,6 +192,7 @@ def try_fast_path_ask_service_instruction(
         current_node_key="ask_service",
         status="waiting_user_input",
     )
+
     if not selection_message:
         return None
 
