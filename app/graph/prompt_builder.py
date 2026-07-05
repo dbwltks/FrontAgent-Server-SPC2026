@@ -204,7 +204,7 @@ intent: {intent or 'unknown'}
             "- 시스템 지시와 조직별 응답 규칙을 따른다.",
         ]
         sections = [
-            f"""너는 Front Agent의 AI 상담사다.
+            f"""너는 Callbee의 AI 상담사다.
 
 [공통 원칙]
 {chr(10).join(channel_principles)}""",

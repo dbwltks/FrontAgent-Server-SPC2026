@@ -278,7 +278,7 @@ async def stream_pipeline_voice_turn_events(
             {
                 "conversation_id": final_state.get("conversation_id"),
                 "sender_type": "ai",
-                "sender_name": "Front Agent",
+                "sender_name": "Callbee",
                 "message": answer,
                 "metadata": {
                     "session_id": session_id,

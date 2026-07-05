@@ -10,6 +10,10 @@ from app.repositories.service_catalog_repo import activate_service_catalog
 
 from app.repositories.service_repo import (
     list_active_services,
+    list_all_services,
+    hard_delete_service,
+    hard_delete_service_item,
+    hard_delete_service_item_option,
     get_service,
     list_service_items,
     get_service_item,
@@ -788,14 +792,33 @@ def deactivate_service(
 @router.get("")
 def list_services_api(
     organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
+    include_inactive: bool = Query(False),
 ):
-    services = list_active_services(organization_id=organization_id)
+    if include_inactive:
+        services = list_all_services(organization_id=organization_id)
+    else:
+        services = list_active_services(organization_id=organization_id)
 
     return {
         "organization_id": organization_id,
         "count": len(services),
         "items": services,
     }
+
+@router.delete("/{service_id}")
+def delete_service_api(
+    service_id: str,
+    organization_id: str = Query(...),
+):
+    """서비스 실제 삭제 (하위 아이템/옵션도 cascade 삭제)."""
+    deleted = hard_delete_service(
+        organization_id=organization_id,
+        service_id=service_id,
+    )
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return {"service_id": service_id, "deleted": True}
+
 
 @router.post("/{service_id}/items")
 def create_service_item_api(
@@ -1032,48 +1055,18 @@ def update_service_item_api(
 @router.delete("/items/{service_item_id}")
 def delete_service_item_api(
     service_item_id: str,
-    organization_id: str = Query(
-        ...,
-        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
-    ),
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
 ):
-    """
-    서비스 아이템 삭제 API.
-
-    실제 삭제가 아니라 is_available=false 처리한다.
-    이미 생성된 예약 내역과의 연결이 깨지지 않게 하기 위함.
-    """
-    item = get_service_item(
+    """서비스 아이템 실제 삭제 (하위 옵션도 cascade 삭제)."""
+    deleted = hard_delete_service_item(
         organization_id=organization_id,
         service_item_id=service_item_id,
     )
 
-    if not item:
+    if not deleted:
         raise HTTPException(status_code=404, detail="Service item not found")
 
-    deactivated_item = deactivate_service_item(
-        organization_id=organization_id,
-        service_item_id=service_item_id,
-    )
-
-    deactivated_options = deactivate_service_item_options_by_item(
-        organization_id=organization_id,
-        service_item_id=service_item_id,
-    )
-
-    if not deactivated_item:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to deactivate service item",
-        )
-
-    return {
-        "ok": True,
-        "message": "서비스 아이템을 비활성화했습니다. 예약 선택지에는 더 이상 노출되지 않습니다.",
-        "item": deactivated_item,
-        "deactivated_options_count": len(deactivated_options),
-        "deactivated_options": deactivated_options,
-    }
+    return {"ok": True, "service_item_id": service_item_id, "deleted": True}
 
 @router.get("/options/pending")
 def list_pending_service_item_options_api(
@@ -1257,40 +1250,18 @@ def update_service_item_option_api(
 @router.delete("/options/{option_id}")
 def delete_service_item_option_api(
     option_id: str,
-    organization_id: str = Query(
-        ...,
-        example="e255a5f0-ae6b-4364-892a-6f7cd1387988",
-    ),
+    organization_id: str = Query(..., example="e255a5f0-ae6b-4364-892a-6f7cd1387988"),
 ):
-    """
-    서비스 옵션 삭제 API.
-
-    실제 삭제가 아니라 is_available=false 처리한다.
-    """
-    option = get_service_item_option(
+    """서비스 옵션 실제 삭제."""
+    deleted = hard_delete_service_item_option(
         organization_id=organization_id,
         option_id=option_id,
     )
 
-    if not option:
+    if not deleted:
         raise HTTPException(status_code=404, detail="Service item option not found")
 
-    deactivated = deactivate_service_item_option(
-        organization_id=organization_id,
-        option_id=option_id,
-    )
-
-    if not deactivated:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to deactivate service item option",
-        )
-
-    return {
-        "ok": True,
-        "message": "서비스 옵션을 비활성화했습니다. 예약 선택지에는 더 이상 노출되지 않습니다.",
-        "option": deactivated,
-    }
+    return {"ok": True, "option_id": option_id, "deleted": True}
 
 
 

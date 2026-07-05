@@ -377,6 +377,20 @@ def list_service_item_options(
 
     return result.data or []
 
+def list_all_services(
+    organization_id: str,
+) -> list[dict]:
+    """활성/비활성 모두 포함한 전체 서비스 목록 (관리자용)."""
+    result = (
+        supabase.table("services")
+        .select("*")
+        .eq("organization_id", organization_id)
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return result.data or []
+
+
 def list_active_services(
     organization_id: str,
 ) -> list[dict]:
@@ -705,6 +719,39 @@ def deactivate_service_item_option(
 
     rows = result.data or []
     return rows[0] if rows else None
+
+
+def hard_delete_service(*, organization_id: str, service_id: str) -> bool:
+    result = (
+        supabase.table("services")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("id", service_id)
+        .execute()
+    )
+    return bool(result.data)
+
+
+def hard_delete_service_item(*, organization_id: str, service_item_id: str) -> bool:
+    result = (
+        supabase.table("service_items")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("id", service_item_id)
+        .execute()
+    )
+    return bool(result.data)
+
+
+def hard_delete_service_item_option(*, organization_id: str, option_id: str) -> bool:
+    result = (
+        supabase.table("service_item_options")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("id", option_id)
+        .execute()
+    )
+    return bool(result.data)
 
 
 def resolve_service_item_by_name(

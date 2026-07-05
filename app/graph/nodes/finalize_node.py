@@ -53,7 +53,7 @@ def _save_ai_message(
         organization_id=organization_id,
         conversation_id=resolved_conversation_id,
         sender_type="ai",
-        sender_name="Front Agent",
+        sender_name="Callbee",
         message=final_response,
         metadata=metadata,
     )

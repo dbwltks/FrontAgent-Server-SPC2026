@@ -159,7 +159,6 @@ def create_conversation_message(
 
     return result.data[0]
 
-
 def update_conversation_last_message(
     organization_id: str,
     conversation_id: str,
@@ -189,7 +188,6 @@ def update_conversation_last_message(
         return None
 
     return result.data[0]
-
 
 def list_conversations(
     organization_id: str,
@@ -244,7 +242,6 @@ def get_conversation(
         return None
 
     return result.data[0]
-
 
 def list_conversation_messages(
     organization_id: str,
@@ -459,3 +456,39 @@ def update_conversation_ai_enabled(
         return None
 
     return result.data[0]
+
+def delete_conversation_messages(
+    organization_id: str,
+    conversation_id: str,
+) -> None:
+    (
+        supabase.table("conversation_messages")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("conversation_id", conversation_id)
+        .execute()
+    )
+
+
+def delete_conversation(
+    organization_id: str,
+    conversation_id: str,
+) -> bool:
+    """
+    상담방과 하위 메시지를 삭제한다.
+    """
+
+    delete_conversation_messages(
+        organization_id=organization_id,
+        conversation_id=conversation_id,
+    )
+
+    result = (
+        supabase.table("conversations")
+        .delete()
+        .eq("organization_id", organization_id)
+        .eq("id", conversation_id)
+        .execute()
+    )
+
+    return bool(result.data)
