@@ -110,6 +110,21 @@ def delete_knowledge_chunks(
 
     return bool(result.data)
 
+
+def update_knowledge_chunks_folder(
+    *,
+    organization_id: str,
+    source_id: str,
+    folder_id: str | None,
+) -> None:
+    (
+        supabase.table("knowledge_chunks")
+        .update({"folder_id": folder_id})
+        .eq("organization_id", organization_id)
+        .eq("source_id", source_id)
+        .execute()
+    )
+
 def get_knowledge_source_by_checksum(
     organization_id: str,
     checksum_sha256: str,

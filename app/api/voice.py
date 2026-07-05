@@ -287,7 +287,7 @@ async def process_voice_turn(
             {
                 "conversation_id": result.get("conversation_id"),
                 "sender_type": "ai",
-                "sender_name": "Front Agent",
+                "sender_name": "Callbee",
                 "message": answer,
                 "metadata": {
                     "session_id": session_id,

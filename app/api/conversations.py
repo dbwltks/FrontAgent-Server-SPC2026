@@ -10,6 +10,7 @@ from app.repositories.conversation_repo import (
     update_conversation_last_message,
     close_conversation,
     update_conversation_ai_enabled,
+    delete_conversation,
 )
 
 
@@ -232,3 +233,39 @@ def update_ai_enabled(
         )
 
     return conversation
+
+@router.delete("/conversations/{conversation_id}")
+def delete_conversation_api(
+    conversation_id: str,
+    organization_id: str,
+):
+    """
+    상담방(채팅/통화 내역)과 메시지를 삭제한다.
+    """
+
+    conversation = get_conversation(
+        organization_id=organization_id,
+        conversation_id=conversation_id,
+    )
+
+    if not conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found",
+        )
+
+    deleted = delete_conversation(
+        organization_id=organization_id,
+        conversation_id=conversation_id,
+    )
+
+    if not deleted:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete conversation",
+        )
+
+    return {
+        "ok": True,
+        "conversation_id": conversation_id,
+    }

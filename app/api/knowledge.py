@@ -14,11 +14,13 @@ from app.services.service_sync_pipeline import extract_and_sync_services_from_kn
 from app.core.config import settings
 from app.rag.indexer import create_knowledge_source, index_text, update_source_status
 from app.rag.text_extractor import extract_text_from_file, extract_text_from_url, extract_chunks_from_file
+from app.repositories.knowledge_folder_repo import get_knowledge_folder
 from app.repositories.knowledge_repo import (
     list_knowledge_sources,
     get_knowledge_source,
     get_knowledge_source_by_checksum,
     update_knowledge_source,
+    update_knowledge_chunks_folder,
     delete_knowledge_source,
     list_knowledge_chunks,
 )
@@ -59,6 +61,7 @@ class KnowledgeUpdateRequest(BaseModel):
 
     is_referenced: bool | None = None
     status: str | None = None
+    folder_id: str | None = None
 
     # 본문 수정 후 서비스 후보 재추출 여부
     auto_extract_services: bool = True
@@ -482,7 +485,7 @@ async def patch_knowledge_source(
             exclude_unset=True,
             exclude={"content", "auto_extract_services"},
         ).items()
-        if value is not None or isinstance(value, bool)
+        if key == "folder_id" or value is not None or isinstance(value, bool)
     }
 
     content_changed = req.content is not None
@@ -492,6 +495,17 @@ async def patch_knowledge_source(
             status_code=400,
             detail="No fields to update",
         )
+
+    if "folder_id" in update_data and update_data["folder_id"] is not None:
+        folder = get_knowledge_folder(
+            organization_id=organization_id,
+            folder_id=update_data["folder_id"],
+        )
+        if not folder:
+            raise HTTPException(
+                status_code=404,
+                detail="Knowledge folder not found",
+            )
 
     updated_source = source
 
@@ -507,6 +521,17 @@ async def patch_knowledge_source(
                 status_code=404,
                 detail="Knowledge source not found",
             )
+
+        if "folder_id" in update_data:
+            await asyncio.to_thread(
+                update_knowledge_chunks_folder,
+                organization_id=organization_id,
+                source_id=source_id,
+                folder_id=update_data["folder_id"],
+            )
+            from app.rag.retriever import clear_semantic_cache
+
+            await asyncio.to_thread(clear_semantic_cache, organization_id)
 
     service_sync = None
 

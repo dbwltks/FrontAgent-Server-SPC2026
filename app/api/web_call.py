@@ -452,7 +452,7 @@ def _save_realtime_turn_background(
                 organization_id=organization_id,
                 conversation_id=conversation_id,
                 sender_type="ai",
-                sender_name="Front Agent",
+                sender_name="Callbee",
                 message=answer,
                 metadata={"session_id": session_id, "channel": CHANNEL, "source": "realtime_search_knowledge"},
             )
