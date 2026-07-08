@@ -122,14 +122,21 @@ class ApproveServiceRequest(BaseModel):
         example="00000000-0000-0000-0000-000000000000",
     )
 
-    # 관리자가 승인 전에 수정할 수 있는 값들
     name: str | None = None
     description: str | None = None
-    price: int | None = None
-    duration_minutes: int | None = None
+    price: float | None = None
+    duration_minutes: float | None = None
 
     is_active: bool = True
     approved_by: str | None = None
+
+    @property
+    def price_int(self) -> int | None:
+        return int(self.price) if self.price is not None else None
+
+    @property
+    def duration_minutes_int(self) -> int | None:
+        return int(self.duration_minutes) if self.duration_minutes is not None else None
 
 
 class RejectServiceRequest(BaseModel):
@@ -146,13 +153,20 @@ class ApplyPendingServiceRequest(BaseModel):
         example="00000000-0000-0000-0000-000000000000",
     )
 
-    # pending_payload 값을 그대로 쓰지 않고 관리자가 수정해서 반영할 수 있음
     name: str | None = None
     description: str | None = None
-    price: int | None = None
-    duration_minutes: int | None = None
+    price: float | None = None
+    duration_minutes: float | None = None
 
     approved_by: str | None = None
+
+    @property
+    def price_int(self) -> int | None:
+        return int(self.price) if self.price is not None else None
+
+    @property
+    def duration_minutes_int(self) -> int | None:
+        return int(self.duration_minutes) if self.duration_minutes is not None else None
 
 class IgnorePendingServiceRequest(BaseModel):
     organization_id: str = Field(
@@ -501,8 +515,8 @@ def approve_service(
         {
             "name": req.name,
             "description": req.description,
-            "price": req.price,
-            "duration_minutes": req.duration_minutes,
+            "price": req.price_int,
+            "duration_minutes": req.duration_minutes_int,
         }
     )
 
@@ -624,9 +638,9 @@ def apply_pending_service_change(
             if req.description is not None
             else pending_payload.get("description")
         ),
-        "price": req.price if req.price is not None else pending_payload.get("price"),
+        "price": req.price_int if req.price is not None else pending_payload.get("price"),
         "duration_minutes": (
-            req.duration_minutes
+            req.duration_minutes_int
             if req.duration_minutes is not None
             else pending_payload.get("duration_minutes")
         ),
@@ -804,6 +818,58 @@ def list_services_api(
         "count": len(services),
         "items": services,
     }
+
+class UpdateServiceRequest(BaseModel):
+    organization_id: str = Field(..., example="a55c98f9-74ba-40d8-bc9d-bc3f1c0870da")
+    name: str | None = None
+    description: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    duration_minutes: float | None = None
+    is_active: bool | None = None
+    is_reservable: bool | None = None
+
+    @property
+    def price_int(self) -> int | None:
+        return int(self.price) if self.price is not None else None
+
+    @property
+    def duration_minutes_int(self) -> int | None:
+        return int(self.duration_minutes) if self.duration_minutes is not None else None
+
+
+@router.patch("/{service_id}")
+def update_service_api(
+    service_id: str,
+    req: UpdateServiceRequest,
+):
+    """서비스 수정 (활성화 토글, 이름/가격 등 수정)."""
+    _get_service_or_404(organization_id=req.organization_id, service_id=service_id)
+
+    update_payload = _dump_exclude_unset(req)
+    update_payload.pop("organization_id", None)
+    if "price" in update_payload:
+        update_payload["price"] = req.price_int
+    if "duration_minutes" in update_payload:
+        update_payload["duration_minutes"] = req.duration_minutes_int
+
+    if not update_payload:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    result = (
+        supabase.table("services")
+        .update(update_payload)
+        .eq("organization_id", req.organization_id)
+        .eq("id", service_id)
+        .execute()
+    )
+
+    rows = result.data or []
+    if not rows:
+        raise HTTPException(status_code=500, detail="Failed to update service")
+
+    return {"service": rows[0]}
+
 
 @router.delete("/{service_id}")
 def delete_service_api(

@@ -52,8 +52,7 @@ class Settings(BaseSettings):
     # .env에 남아 있을 수 있는 미사용 키(Deepgram STT 연동 제거 후 호환용).
     deepgram_api_key: str = ""
 
-    class Config:
-        env_file = ".env"
+    model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 settings = Settings()

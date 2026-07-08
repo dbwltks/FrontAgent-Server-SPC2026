@@ -70,13 +70,24 @@ def _passes_retrieval_threshold(
     if used_hybrid:
         if similarity < HYBRID_SIMILARITY_THRESHOLD:
             return False
+        # vector similarity가 충분히 높으면 keyword hit 없어도 통과.
+        # (질문 어미 등이 keyword로 잘못 추출된 경우 대비)
+        if similarity >= 0.50:
+            return True
         content = row.get("content") or ""
-        return _keyword_hits_in_content(
+        hits = _keyword_hits_in_content(
             content,
             query_keywords,
             chunk_keywords=row.get("keywords"),
             vocabulary=vocabulary,
-        ) >= _required_keyword_hits(query_keywords)
+        )
+        required = _required_keyword_hits(query_keywords)
+        # keyword hit가 1개 이상이고 similarity가 0.40 이상이면 통과.
+        # "A/S 신청 방법" 쿼리 → A/S 청크 sim≈0.49, hit=1(a/s) 케이스 대응.
+        # (화장실 청소 청크는 "a/s" keyword가 없어 hit=0 → 걸러짐)
+        if hits >= 1 and similarity >= 0.40:
+            return True
+        return hits >= required
 
     return similarity >= VECTOR_SIMILARITY_THRESHOLD
 
@@ -127,17 +138,26 @@ async def _lookup_semantic_cache(
 
     # 지식/검색 로직이 바뀐 뒤에도 예전 오답 캐시가 남아 있을 수 있다.
     # query keyword와 전혀 맞지 않는 cached chunk면 miss로 처리한다.
+    # 캐시 검증은 반드시 keyword hit를 확인한다 — similarity만으로 판단하면
+    # "화장실 청소" 쿼리가 "콜비" 캐시(sim=0.625 > 0.50)를 통과시키는 오염 발생.
     if query_keywords:
         top_chunk = cached_result[0]
+        top_sim = top_chunk.get("similarity", 0)
+        if top_sim < HYBRID_SIMILARITY_THRESHOLD:
+            return None
         content = top_chunk.get("content") or ""
-        if _keyword_hits_in_content(
+        hits = _keyword_hits_in_content(
             content,
             query_keywords,
             chunk_keywords=top_chunk.get("keywords"),
             vocabulary=vocabulary,
-        ) < _required_keyword_hits(query_keywords):
+        )
+        required = _required_keyword_hits(query_keywords)
+        # keyword hit가 1개도 없으면 무조건 캐시 miss
+        if hits == 0:
             return None
-        if top_chunk.get("similarity", 0) < HYBRID_SIMILARITY_THRESHOLD:
+        # hit 1개 이상이지만 required 미달이면 sim이 높아야 통과
+        if hits < required and top_sim < 0.50:
             return None
 
     return cached_result

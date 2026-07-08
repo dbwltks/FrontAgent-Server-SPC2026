@@ -23,7 +23,7 @@
       "node_type": "message",
       "label": "예약 요청 완료",
       "config": {
-        "message": "{{memory.customer_name}}님, 예약 요청이 접수되었습니다. 예약일은 {{memory.normalized_date}} {{memory.normalized_time}}입니다. 담당자가 확인 후 안내드리겠습니다.",
+        "message": "{{memory.customer_name}}님, 예약 요청이 접수되었습니다. 예약일은 {{memory.reservation_date}} {{memory.reservation_time}}입니다. 담당자가 확인 후 안내드리겠습니다.",
         "next_step_mode": "end"
       },
       "code": null,
