@@ -10,13 +10,11 @@ BOUNDARY_SEPARATORS = ["\n", ". ", "! ", "? ", "다. ", "요. ", " "]
 # 자연스러운 경계를 찾기 위해 chunk_size 끝에서부터 거꾸로 탐색하는 범위.
 BOUNDARY_SEARCH_WINDOW = 100
 
-# "### 서비스 아이템: A" 같은 마크다운 헤더(레벨 3 이상). 서비스 카탈로그처럼
-# 항목이 헤더로 나뉜 문서를 글자수 경계로만 자르면 A의 설명과 B의 설명이 한
-# chunk에 섞여(실측 사례) 검색/요약 둘 다 부정확해진다 - "다음 헤더 직전"을
-# chunk_size 범위와 무관하게 최우선 경계로 써서 헤더 하나당 chunk 하나가 되게
-# 한다. 레벨 1~2(# 문서 제목, ## 카테고리)는 보통 본문이 거의 없어 레벨 3부터만
-# 분리 기준으로 쓴다 - 안 그러면 제목 한 줄짜리 chunk가 과도하게 생긴다.
-HEADING_PATTERN = re.compile(r"^#{3,6}\s+\S", re.MULTILINE)
+# "## 서비스 아이템: A" 같은 레벨 1~2 마크다운 헤더를 청크 경계로 사용한다.
+# 레벨 3 이하(###, ####...)는 소제목으로 같은 항목 안에 묶어야 하므로 경계로
+# 쓰지 않는다. 예: "화장실 청소" 항목 안의 ### 기본 가격, ### 서비스 설명 등은
+# 모두 한 청크에 포함돼야 "화장실 청소 얼마에요?" 질문과 연결된다.
+HEADING_PATTERN = re.compile(r"^#{1,2}\s+\S", re.MULTILINE)
 
 
 def find_next_heading_start(text: str, start: int) -> int | None:
@@ -72,8 +70,8 @@ def find_chunk_end(text: str, start: int, chunk_size: int) -> tuple[int, bool]:
 
 def chunk_text(
     text: str,
-    chunk_size: int = 600,
-    overlap: int = 80,
+    chunk_size: int = 1200,
+    overlap: int = 100,
 ) -> list[str]:
     """
     텍스트를 일정 크기의 chunk로 나눈다.

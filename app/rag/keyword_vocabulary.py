@@ -81,7 +81,13 @@ def _build_synonym_groups(raw_terms: list[str]) -> tuple[frozenset[str], ...]:
 
 
 def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKeywordVocabulary:
-    raw_terms: list[str] = []
+    # name/option_value 등 짧은 용어는 단어 단위 분리(phrase_variants)로 동의어 생성.
+    # description처럼 긴 문장은 통째로만 terms에 추가한다 - 단어 단위로 쪼개면
+    # "1회,", "격주", "공간을" 같은 의미 없는 조각이 vocabulary에 들어가 keyword
+    # 추출을 오염시킨다(실측: 이사 청소/베란다 청소 청크 keywords가 정기청소
+    # description 단어들로 채워져 "이사" keyword가 max_keywords에 못 들어가는 사례).
+    name_terms: list[str] = []   # phrase_variants 적용 (단어 분리 O)
+    phrase_only_terms: list[str] = []  # 통째로만 (단어 분리 X)
 
     services = (
         supabase.table("services")
@@ -92,8 +98,8 @@ def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKe
         .execute()
     )
     for row in services.data or []:
-        raw_terms.append(row.get("name") or "")
-        raw_terms.append(row.get("description") or "")
+        name_terms.append(row.get("name") or "")
+        phrase_only_terms.append(row.get("description") or "")
 
     items = (
         supabase.table("service_items")
@@ -103,8 +109,8 @@ def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKe
         .execute()
     )
     for row in items.data or []:
-        raw_terms.append(row.get("name") or "")
-        raw_terms.append(row.get("description") or "")
+        name_terms.append(row.get("name") or "")
+        phrase_only_terms.append(row.get("description") or "")
 
     options = (
         supabase.table("service_item_options")
@@ -114,8 +120,8 @@ def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKe
         .execute()
     )
     for row in options.data or []:
-        raw_terms.append(row.get("option_group") or "")
-        raw_terms.append(row.get("option_value") or "")
+        name_terms.append(row.get("option_group") or "")
+        name_terms.append(row.get("option_value") or "")
 
     sources = (
         supabase.table("knowledge_sources")
@@ -125,12 +131,22 @@ def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKe
         .execute()
     )
     for row in sources.data or []:
-        raw_terms.append(row.get("title") or "")
+        # 파일명(01_서비스_전체_카탈로그.md)은 vocabulary 노이즈만 유발하므로 제외
+        pass
 
-    org_groups = _build_synonym_groups(raw_terms)
+    # synonym group과 phrase_variants는 name(짧은 용어)에만 적용한다.
+    # description(긴 문장)을 _build_synonym_groups에 넣으면 문장 안 개별 단어들이
+    # 모두 synonym group에 들어가고, terms.update(group)으로 vocabulary가 오염된다.
+    org_groups = _build_synonym_groups(name_terms)
     all_groups = org_groups + UNIVERSAL_SYNONYM_GROUPS
 
-    terms = _collect_terms(raw_terms)
+    terms = _collect_terms(name_terms)
+    # description/긴 설명은 통째로만 추가 (단어 분리 없이)
+    for raw in phrase_only_terms:
+        text = _normalize_spaces(str(raw or ""))
+        if len(text) >= 2:
+            terms.add(text.lower())
+
     for group in all_groups:
         terms.update(group)
 

@@ -18,7 +18,8 @@ from app.rag.keyword_vocabulary import (
 
 
 _KOREAN_QUESTION_SUFFIX = re.compile(
-    r"(얼마야|얼마예요|얼마에요|얼마인가요|얼마|인가요|인가|뭐야|뭐예요|뭐에요|무엇|어때|할까요|할까|인지)$"
+    r"(얼마야|얼마예요|얼마에요|얼마인가요|얼마|인가요|인가|뭐야|뭐예요|뭐에요|무엇|어때|할까요|할까|인지"
+    r"|뭔가요|뭔지|뭔데|뭐죠|뭐인지|뭔지요|뭐예|어떤가요|어떤지|어떻게|어떤데요|어떻죠|어떤거죠)$"
 )
 _KOREAN_VERB_SUFFIX = re.compile(
     r"(합니다|입니다|됩니다|해요|하세요|주세요|드립니다|진행됩니다|포함합니다|가능합니다)$"
@@ -43,7 +44,14 @@ _BASE_STOPWORDS = {
     "에서", "으로", "로", "입니다", "했습니다", "결제했습니다", "카드로",
     "현금로", "계좌로", "담당", "정산", "미정산",
     "어떻게", "되나요", "되나", "있나요", "있나",
+    "뭔가요", "뭔지", "뭔데", "뭐죠", "뭐예", "뭐인지",
+    "어떤가요", "어떤지", "어떤데요", "어떻죠", "어떤거죠",
+    "알려주세요", "알고싶어요", "궁금해요", "궁금한데요",
     "설명", "옵션", "포함", "진행", "확인", "작업", "상태", "전후",
+    # "청소"는 청소 업체 도메인에서 모든 청크에 공통적으로 있어
+    # keyword로서 변별력이 없다 — query keyword로 쓰면 전혀 다른 청크가
+    # hits=1로 통과되는 오염이 발생한다(실측: "이사 청소" 쿼리 → 콜비 청크 통과).
+    "청소",
     "희망", "여부", "종류", "아이템", "카테고리", "전체", "예상",
     "포함합니다", "진행됩니다", "서비스입니다", "원입니다", "가능합니다",
     "알려주시면", "정리해", "보관해", "필요한", "발생할", "늘어날",
@@ -206,9 +214,13 @@ def extract_keywords(
     financial = _extract_financial_keywords(text, stopwords)
 
     english: list[str] = []
-    for word in re.findall(r"[A-Za-z]{3,}", text):
+    # "A/S", "FAQ", "AI", "B2B" 같은 짧은 영문 약어도 포함한다.
+    # 슬래시/하이픈 연결("A/S", "B-2") 또는 2자 이상 단독 영문을 모두 잡는다.
+    _english_skip = {"nan", "none", "true", "false", "null", "the", "and", "for",
+                     "cad", "usd", "krw", "is", "or", "of", "in", "to", "at", "by"}
+    for word in re.findall(r"[A-Za-z]{1,}(?:[/\-][A-Za-z]{1,})+|[A-Za-z]{2,}", text):
         w = word.lower()
-        if w not in {"nan", "none", "true", "false", "null", "the", "and", "for", "cad", "usd", "krw"}:
+        if w not in _english_skip:
             english.append(w)
 
     korean: list[str] = []
@@ -232,7 +244,10 @@ def extract_keywords(
 
     seen: set[str] = set()
     result: list[str] = []
-    for word in org_keywords + structured + financial + english + korean + numeric:
+    # structured(마크다운 서비스명 헤더)를 org_keywords보다 앞에 놓는다.
+    # vocabulary terms가 먼저 채워져 max_keywords를 소진하면 "이사 청소" 같은
+    # 서비스명 헤더 keyword가 누락된다(실측 사례).
+    for word in structured + org_keywords + financial + english + korean + numeric:
         key = word.lower()
         if key in seen or key in stopwords:
             continue

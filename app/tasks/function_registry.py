@@ -355,14 +355,23 @@ def _format_reservation_option(
     start_label = start_at
     if start_at:
         try:
-            start_label = _parse_datetime_value(start_at, "Asia/Seoul").strftime(
-                "%m/%d %H:%M"
-            )
+            start_label = _parse_datetime_value(start_at, "Asia/Seoul").astimezone(
+                ZoneInfo("Asia/Seoul")
+            ).strftime("%m/%d %H:%M")
         except Exception:
             start_label = start_at
 
     customer_name = reservation.get("customer_name") or "고객"
-    status = reservation.get("status") or "-"
+    _status_map = {
+        "requested": "접수대기",
+        "confirmed": "예약확정",
+        "cancelled": "취소됨",
+        "rejected": "거절됨",
+        "completed": "완료",
+        "no_show": "노쇼",
+    }
+    raw_status = reservation.get("status") or "-"
+    status = _status_map.get(raw_status, raw_status)
 
     return {
         "number": index,
