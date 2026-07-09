@@ -70,7 +70,13 @@ def _looks_like_policy_question(message: str) -> bool:
         re.search(r"(\?|인가요|인가|되나요|될까요|할\s*수\s*있|가능한)", msg)
     )
     has_policy_topic = bool(re.search(r"(가능|되나|정책|취소|변경|환불|수수료)", msg))
-    has_action = bool(re.search(r"(해줘|해주|할게|하고\s*싶|부탁|신청|예약\s*해|잡아)", msg))
+    has_action = bool(
+        re.search(
+            r"(해줘|해주|할게|하고\s*싶|부탁|신청|예약\s*해|잡아"
+            r"|할\s*수\s*있(을까요|나요|어요)?|가능(할까요|한가요)?)",
+            msg,
+        )
+    )
     return has_question and has_policy_topic and not has_action
 
 

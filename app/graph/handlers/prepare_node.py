@@ -1,10 +1,10 @@
 import asyncio
 
 from app.graph.checkpoint_state import merge_turn_message_updates, slim_channel_values_for_checkpoint
-from app.graph.nodes.agent_node import agent_node
-from app.graph.nodes.ai_handoff_node import build_ai_handoff_update
-from app.graph.nodes.conversation_node import conversation_node
-from app.graph.nodes.finalize_node import schedule_turn_persistence
+from app.graph.handlers.agent_node import agent_node
+from app.graph.handlers.ai_handoff_node import build_ai_handoff_update
+from app.graph.handlers.conversation_node import conversation_node
+from app.graph.handlers.finalize_node import schedule_turn_persistence
 from app.graph.state import AgentState
 
 

@@ -71,7 +71,8 @@ class PromptBuilderEndSessionTests(unittest.TestCase):
             should_end_session=True,
         )
         self.assertIn("[통화 종료]", prompt)
-        self.assertIn("더 도와드릴 일이 있으신가요", prompt)
+        self.assertIn("추가 질문이나", prompt)
+        self.assertIn("하지 않는다", prompt)
 
     def test_chat_prompt_includes_end_session_guidance(self):
         prompt = build_response_instructions(

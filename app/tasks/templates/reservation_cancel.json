@@ -64,17 +64,66 @@
       "retry_limit": 0
     },
     {
+      "node_key": "confirm_nearest_cancel",
+      "node_type": "instruction",
+      "label": "가장 가까운 예약 취소 확인",
+      "config": {
+        "instruction": "[역할]\n취소 가능한 예약 중 가장 가까운 것 하나를 자연스러운 문장으로 안내하고, 그것을 취소할지 확인받는 에이전트다.\n\n[대화 흐름]\n- <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"cancelable_options\"></promptdata>의 첫 번째(number=1) 항목만 참고한다. 나머지는 언급하지 않는다.\n- \"OO월 OO일 OO시 [서비스명] 예약을 취소할까요?\"처럼 자연스러운 확인 문장으로 물어본다. 매번 다른 자연스러운 표현을 쓴다.\n- 고객이 긍정(네, 취소해주세요 등)하면 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"cancel_confirmed\"></promptdata>를 true로, <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"selected_reservation_number\"></promptdata>를 1로 저장하고 종료한다.\n- 고객이 부정(아니요, 다른 거요 등)하면 cancel_confirmed를 false로 저장하고 종료한다(selected_reservation_number는 저장하지 않는다).\n\n[종료 조건]\n- cancel_confirmed 값이 정해지면 종료한다.",
+        "next_step_mode": "branch",
+        "save_to_memory": true,
+        "branch_node_key": "cancel_reservation",
+        "branch_condition": "memory.cancel_confirmed == true",
+        "fallback_node_key": "route_cancel_by_count"
+      },
+      "position_x": 1360,
+      "position_y": 200,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "route_cancel_by_count",
+      "node_type": "condition",
+      "label": "취소 가능 건수로 분기",
+      "config": {
+        "variable": "cancelable_count",
+        "operator": "greater_than",
+        "value": 1,
+        "save_as": "has_more_cancelable",
+        "next_step_mode": "branch",
+        "branch_node_key": "ask_cancel_number",
+        "branch_condition": "memory.has_more_cancelable == true",
+        "fallback_node_key": "no_more_to_cancel_end"
+      },
+      "position_x": 1560,
+      "position_y": 280,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "no_more_to_cancel_end",
+      "node_type": "message",
+      "label": "취소할 다른 예약 없음",
+      "config": {
+        "message": "취소 가능한 다른 예약은 없어요.",
+        "next_step_mode": "end"
+      },
+      "position_x": 1760,
+      "position_y": 440,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
       "node_key": "ask_cancel_number",
       "node_type": "instruction",
       "label": "취소 예약 선택",
       "config": {
-        "instruction": "[역할]\n고객에게 취소 가능한 예약 목록을 안내하고 번호를 선택받는다.\n\n[대화 흐름]\n- memory.cancelable_options 목록을 보여준 뒤 취소할 예약 번호(1, 2, …)를 받는다.\n\n[종료 조건]\n- selected_reservation_number 값을 확인하면 종료한다.\n\n[예외 사항]\n- 전화번호처럼 보이는 답변은 번호 선택으로 처리하지 않는다.\n\n<promptdata type=\"read-variable\" subtype=\"json\" identifier=\"cancelable_options\"></promptdata>\n<promptdata type=\"update-variable\" subtype=\"text\" identifier=\"selected_reservation_number\"></promptdata>",
+        "instruction": "[역할]\n고객이 방금 가장 가까운 예약은 취소를 원하지 않았다. 나머지 취소 가능한 예약 중 어느 것을 취소할지 자연스럽게 안내하고 선택받는 에이전트다.\n\n[대화 흐름]\n- <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"cancelable_options\"></promptdata>를 참고한다(number=1은 방금 거절했으므로 제외하고 안내한다).\n- 표/번호 나열이 아니라 날짜/서비스로 자연스럽게 구분해서 어느 예약인지 물어본다.\n- 고객이 특정 예약을 지목하면, 그 예약의 number 값을 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"selected_reservation_number\"></promptdata>에 저장한다.\n\n[종료 조건]\n- selected_reservation_number 값을 확인하면 종료한다.\n\n[예외 사항]\n- 전화번호처럼 보이는 답변은 번호 선택으로 처리하지 않는다.",
         "next_step_mode": "single",
         "next_node_key": "cancel_reservation",
         "save_to_memory": true
       },
-      "position_x": 1360,
-      "position_y": 200,
+      "position_x": 1760,
+      "position_y": 280,
       "timeout_seconds": 10,
       "retry_limit": 0
     },
@@ -104,7 +153,7 @@
         "function_name": "reservation.lookup_cancelable_reservations",
         "flatten_result": true,
         "next_step_mode": "branch",
-        "branch_node_key": "ask_cancel_number",
+        "branch_node_key": "confirm_nearest_cancel",
         "branch_condition": "memory.has_cancelable_reservations == true",
         "fallback_node_key": "no_cancelable_end"
       },
@@ -141,7 +190,7 @@
     },
     {
       "source_node_key": "lookup_cancelable_reservations",
-      "target_node_key": "ask_cancel_number",
+      "target_node_key": "confirm_nearest_cancel",
       "edge_type": "single",
       "condition_type": "always",
       "condition_config": {

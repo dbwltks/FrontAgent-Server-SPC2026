@@ -36,7 +36,6 @@ class ChatRequest(BaseModel):
     folder_id: str | None = None
     stream: bool = True
     channel: Literal["web_chat", "web_call", "voice"] = "web_chat"
-
     @field_validator("organization_id")
     @classmethod
     def _resolve_organization_id(cls, value: str) -> str:
@@ -261,6 +260,10 @@ async def chat(req: ChatRequest):
         return StreamingResponse(
             stream_chat_response(req),
             media_type="text/event-stream",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+            },
         )
 
     try:

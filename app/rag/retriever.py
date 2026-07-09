@@ -1,14 +1,17 @@
 import asyncio
+import hashlib
+import json
 import logging
+import math
 import re
-import threading
 
 # 질문 embedding 생성
-# → semantic cache(의미상 비슷한 과거 질문) 조회, 있으면 RPC 생략
-# → 없으면 하이브리드 RPC(벡터 + 키워드) 검색 → 결과를 semantic cache에 저장
+# → Redis semantic cache(의미상 비슷한 과거 질문) 조회, 있으면 RPC 생략
+# → 없으면 하이브리드 RPC(벡터 + 키워드) 검색 → 결과를 Redis에 저장
 # → 관련 chunk 반환
 
 from app.core.db import supabase
+from app.core.redis import redis_bytes_client
 from app.providers.embedding_provider import create_embedding
 from app.rag.indexer import extract_keywords, prepare_keywords_for_hybrid_rpc
 from app.rag.query_matching import keyword_hits_in_content
@@ -17,11 +20,13 @@ from app.rag.keyword_vocabulary import get_organization_keyword_vocabulary
 
 logger = logging.getLogger(__name__)
 
+# Redis semantic cache TTL: 지식 업데이트 주기를 고려해 1시간
+_SEMANTIC_CACHE_TTL = 60 * 60
+
 
 # RPC에서 가져올 후보 개수를 match_count보다 넉넉히 두는 배수.
-# match_knowledge_chunks가 similarity_threshold를 모르기 때문에,
 # threshold 필터링 후에도 match_count개를 채울 수 있도록 여유분을 더 가져온다.
-OVERFETCH_MULTIPLIER = 4
+OVERFETCH_MULTIPLIER = 2
 
 # hybrid RPC combined score(0.7 vector + 0.3 keyword) 기준. 실측상 무관 chunk가
 # 0.25~0.27대에 몰려 있어 0.30이 precision/recall 균형이 좋다.
@@ -70,10 +75,6 @@ def _passes_retrieval_threshold(
     if used_hybrid:
         if similarity < HYBRID_SIMILARITY_THRESHOLD:
             return False
-        # vector similarity가 충분히 높으면 keyword hit 없어도 통과.
-        # (질문 어미 등이 keyword로 잘못 추출된 경우 대비)
-        if similarity >= 0.50:
-            return True
         content = row.get("content") or ""
         hits = _keyword_hits_in_content(
             content,
@@ -82,9 +83,13 @@ def _passes_retrieval_threshold(
             vocabulary=vocabulary,
         )
         required = _required_keyword_hits(query_keywords)
-        # keyword hit가 1개 이상이고 similarity가 0.40 이상이면 통과.
+        # keyword가 있으면 반드시 1개 이상 hit해야 통과 — similarity가 높아도 예외 없음.
+        # sim >= 0.50 무조건 통과는 "이사 청소" 쿼리에서 콜비 청크(sim=0.618, hit=0)를
+        # 통과시키는 오염의 원인이었다(실측).
+        if hits == 0:
+            return False
+        # hit 1개 이상이고 similarity가 0.40 이상이면 통과.
         # "A/S 신청 방법" 쿼리 → A/S 청크 sim≈0.49, hit=1(a/s) 케이스 대응.
-        # (화장실 청소 청크는 "a/s" keyword가 없어 hit=0 → 걸러짐)
         if hits >= 1 and similarity >= 0.40:
             return True
         return hits >= required
@@ -92,56 +97,58 @@ def _passes_retrieval_threshold(
     return similarity >= VECTOR_SIMILARITY_THRESHOLD
 
 
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _semantic_cache_key(organization_id: str, folder_id: str | None) -> str:
+    folder_part = folder_id or "all"
+    return f"rag_scache:{organization_id}:{folder_part}"
+
+
 def clear_semantic_cache(organization_id: str, folder_id: str | None = None) -> None:
-    query = supabase.table("knowledge_semantic_cache").delete().eq("organization_id", organization_id)
-    if folder_id:
-        query = query.eq("folder_id", folder_id)
-    query.execute()
+    pattern = _semantic_cache_key(organization_id, folder_id) + ":*"
+    keys = redis_bytes_client.keys(pattern)
+    if keys:
+        redis_bytes_client.delete(*keys)
 
 
-async def _lookup_semantic_cache(
-    organization_id: str,
+def _resolve_semantic_cache_sync(
     query_embedding: list[float],
-    folder_id: str | None,
+    cache_entries: list[bytes],
     query_keywords: list[str] | None = None,
     vocabulary=None,
 ) -> list[dict] | None:
-    try:
-        result = await asyncio.to_thread(
-            lambda: supabase.rpc(
-                "match_knowledge_semantic_cache",
-                {
-                    "query_embedding": query_embedding,
-                    "match_organization_id": organization_id,
-                    "match_folder_id": folder_id,
-                    "match_threshold": SEMANTIC_CACHE_THRESHOLD,
-                },
-            ).execute()
-        )
-    except Exception:
-        logger.warning("semantic cache lookup failed", exc_info=True)
+    """미리 fetch된 Redis 항목들에서 cosine similarity로 최적 캐시를 선택한다."""
+    if not cache_entries:
         return None
 
-    rows = result.data or []
-    if not rows:
+    best_sim = -1.0
+    best_cached: list[dict] | None = None
+
+    for raw in cache_entries:
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        stored_emb: list[float] = entry["embedding"]
+        sim = _cosine_similarity(query_embedding, stored_emb)
+        if sim > best_sim:
+            best_sim = sim
+            best_cached = entry["result"]
+
+    if best_sim < SEMANTIC_CACHE_THRESHOLD or not best_cached:
         return None
 
-    top = rows[0]
-    if top.get("similarity", 0) < SEMANTIC_CACHE_THRESHOLD:
-        return None
-
-    cached_result = top.get("result")
-    # 과거 버전이나 수동 입력으로 빈 결과 캐시가 남아 있으면 캐시 miss로 취급한다.
-    # 빈 결과를 hit로 반환하면 이후 실제 지식이 추가되어도 RPC 검색을 건너뛸 수 있다.
-    if not cached_result:
-        return None
-
-    # 지식/검색 로직이 바뀐 뒤에도 예전 오답 캐시가 남아 있을 수 있다.
-    # query keyword와 전혀 맞지 않는 cached chunk면 miss로 처리한다.
-    # 캐시 검증은 반드시 keyword hit를 확인한다 — similarity만으로 판단하면
-    # "화장실 청소" 쿼리가 "콜비" 캐시(sim=0.625 > 0.50)를 통과시키는 오염 발생.
     if query_keywords:
-        top_chunk = cached_result[0]
+        top_chunk = best_cached[0]
         top_sim = top_chunk.get("similarity", 0)
         if top_sim < HYBRID_SIMILARITY_THRESHOLD:
             return None
@@ -153,14 +160,21 @@ async def _lookup_semantic_cache(
             vocabulary=vocabulary,
         )
         required = _required_keyword_hits(query_keywords)
-        # keyword hit가 1개도 없으면 무조건 캐시 miss
         if hits == 0:
             return None
-        # hit 1개 이상이지만 required 미달이면 sim이 높아야 통과
         if hits < required and top_sim < 0.50:
             return None
 
-    return cached_result
+    return best_cached
+
+
+async def _resolve_semantic_cache(
+    query_embedding: list[float],
+    cache_entries: list[bytes],
+    query_keywords: list[str] | None = None,
+    vocabulary=None,
+) -> list[dict] | None:
+    return _resolve_semantic_cache_sync(query_embedding, cache_entries, query_keywords, vocabulary)
 
 
 def _store_semantic_cache_background(
@@ -169,28 +183,37 @@ def _store_semantic_cache_background(
     result: list[dict],
     folder_id: str | None,
 ) -> None:
-    # 검색 결과가 0건인 경우는 캐싱하지 않는다. RAG가 그 순간 우연히 못 찾았거나
-    # threshold 미달이었을 수 있는데, 이걸 캐싱하면 이후 비슷한 질문 전부가
-    # "검색 결과 없음"을 그대로 돌려받게 되어 실제로는 지식이 있어도 못 찾게 된다.
+    # 검색 결과가 0건이면 캐싱하지 않는다.
     if not result:
         return
 
-    # 응답 경로(retrieve_knowledge)를 막지 않도록 백그라운드 스레드에서 저장한다.
-    # 캐시 저장 실패/지연이 이번 턴의 검색 결과 반환을 늦추면 안 된다.
-    def _insert():
-        try:
-            supabase.table("knowledge_semantic_cache").insert(
-                {
-                    "organization_id": organization_id,
-                    "folder_id": folder_id,
-                    "query_embedding": query_embedding,
-                    "result": result,
-                }
-            ).execute()
-        except Exception:
-            logger.warning("semantic cache store failed", exc_info=True)
+    emb_hash = hashlib.sha1(json.dumps(query_embedding[:8]).encode()).hexdigest()[:12]
+    key = _semantic_cache_key(organization_id, folder_id) + f":{emb_hash}"
+    payload = json.dumps({"embedding": query_embedding, "result": result})
 
-    threading.Thread(target=_insert, daemon=True).start()
+    try:
+        redis_bytes_client.setex(key, _SEMANTIC_CACHE_TTL, payload.encode())
+    except Exception:
+        logger.warning("semantic cache store failed", exc_info=True)
+
+
+async def _fetch_semantic_cache_entries(organization_id: str, folder_id: str | None) -> list[bytes]:
+    """embedding 계산 중에 미리 Redis에서 캐시 후보를 가져온다."""
+    try:
+        prefix = _semantic_cache_key(organization_id, folder_id) + ":"
+
+        def _pipeline_get():
+            keys = redis_bytes_client.keys(prefix + "*")
+            if not keys:
+                return []
+            pipe = redis_bytes_client.pipeline(transaction=False)
+            for k in keys:
+                pipe.get(k)
+            return pipe.execute()
+
+        return await asyncio.to_thread(_pipeline_get)
+    except Exception:
+        return []
 
 
 async def retrieve_knowledge(
@@ -199,23 +222,19 @@ async def retrieve_knowledge(
     match_count: int = 5,
     folder_id: str | None = None,
 ) -> list[dict]:
-    # 임베딩 + 키워드를 병렬로 추출
-    query_embedding = await create_embedding(query)
     vocabulary = get_organization_keyword_vocabulary(organization_id)
-    query_keywords = extract_keywords(
-        query,
-        max_keywords=10,
-        vocabulary=vocabulary,
-        for_query=True,
+    query_keywords = extract_keywords(query, max_keywords=10, vocabulary=vocabulary, for_query=True)
+
+    # embedding과 Redis 캐시 항목 fetch를 병렬로 실행
+    query_embedding, cache_entries = await asyncio.gather(
+        create_embedding(query),
+        _fetch_semantic_cache_entries(organization_id, folder_id),
     )
 
-    cached_result = await _lookup_semantic_cache(
-        organization_id,
-        query_embedding,
-        folder_id,
-        query_keywords,
-        vocabulary,
+    cached_result = await _resolve_semantic_cache(
+        query_embedding, cache_entries, query_keywords, vocabulary
     )
+
     if cached_result is not None:
         used_hybrid = bool(query_keywords)
         filtered_cache = [
@@ -253,7 +272,6 @@ async def retrieve_knowledge(
         result = await asyncio.to_thread(
             lambda: supabase.rpc("match_knowledge_chunks", rpc_params).execute()
         )
-
     rows = result.data or []
     used_hybrid = bool(query_keywords)
 
@@ -269,8 +287,11 @@ async def retrieve_knowledge(
     ]
 
     final_rows = filtered_rows[:match_count]
-
-    _store_semantic_cache_background(organization_id, query_embedding, final_rows, folder_id)
+    # 백그라운드로 Redis에 저장 — 이번 응답 속도에 영향 없음
+    asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: _store_semantic_cache_background(organization_id, query_embedding, final_rows, folder_id),
+    )
 
     return final_rows
 

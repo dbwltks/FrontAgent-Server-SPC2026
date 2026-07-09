@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
 from app.core.db import supabase
+from app.core.redis import redis_client
+
+_VOCAB_REDIS_TTL = 60 * 10  # 10분
 
 # 업종 공통으로 자주 쓰이는 질의 표현만 코드에 둔다. 구체 서비스명·상품명은
 # 조직의 services / service_items / knowledge_sources에서 불러온다.
@@ -157,6 +161,26 @@ def load_organization_keyword_vocabulary(organization_id: str) -> OrganizationKe
     )
 
 
+def _vocab_redis_key(organization_id: str) -> str:
+    return f"rag_vocab:{organization_id}"
+
+
+def _vocab_to_json(vocab: OrganizationKeywordVocabulary) -> str:
+    return json.dumps({
+        "terms": list(vocab.terms),
+        "synonym_groups": [list(g) for g in vocab.synonym_groups],
+    })
+
+
+def _vocab_from_json(organization_id: str, raw: str) -> OrganizationKeywordVocabulary:
+    data = json.loads(raw)
+    return OrganizationKeywordVocabulary(
+        organization_id=organization_id,
+        terms=set(data["terms"]),
+        synonym_groups=tuple(frozenset(g) for g in data["synonym_groups"]),
+    )
+
+
 def get_organization_keyword_vocabulary(
     organization_id: str,
     *,
@@ -165,10 +189,31 @@ def get_organization_keyword_vocabulary(
     if not force_reload and organization_id in _vocab_cache:
         return _vocab_cache[organization_id]
 
+    # Redis 캐시 확인 (프로세스 재시작 후에도 빠르게)
+    if not force_reload:
+        try:
+            raw = redis_client.get(_vocab_redis_key(organization_id))
+            if raw:
+                vocab = _vocab_from_json(organization_id, raw)
+                _vocab_cache[organization_id] = vocab
+                return vocab
+        except Exception:
+            pass
+
     vocabulary = load_organization_keyword_vocabulary(organization_id)
     _vocab_cache[organization_id] = vocabulary
+
+    try:
+        redis_client.setex(_vocab_redis_key(organization_id), _VOCAB_REDIS_TTL, _vocab_to_json(vocabulary))
+    except Exception:
+        pass
+
     return vocabulary
 
 
 def clear_organization_keyword_vocabulary(organization_id: str) -> None:
     _vocab_cache.pop(organization_id, None)
+    try:
+        redis_client.delete(_vocab_redis_key(organization_id))
+    except Exception:
+        pass

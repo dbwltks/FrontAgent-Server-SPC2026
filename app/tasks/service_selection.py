@@ -33,7 +33,14 @@ def build_service_selection_message(
     if not service_names:
         return None
 
-    return f"어떤 서비스를 원하시나요? {', '.join(service_names)} 중에서 선택해 주세요."
+    import random
+    templates = [
+        f"저희가 제공하는 서비스는 {', '.join(service_names)}이 있어요. 어떤 걸 원하세요?",
+        f"{', '.join(service_names)} 중에서 원하시는 서비스를 말씀해 주세요.",
+        f"현재 예약 가능한 서비스로는 {', '.join(service_names)}가 있습니다. 어떤 서비스로 예약해 드릴까요?",
+        f"{', '.join(service_names)} 서비스를 운영하고 있어요. 어떤 서비스가 필요하세요?",
+    ]
+    return random.choice(templates)
 
 
 def _looks_like_phone_number(text: str) -> bool:
@@ -54,34 +61,47 @@ def _parse_reservation_selection_number(text: str | None) -> int | None:
 
 
 def build_lookup_result_message(variables: dict[str, Any]) -> str | None:
-    options = variables.get("reservation_options") or []
-    labels = [
-        str(option.get("label")).strip()
-        for option in options
-        if isinstance(option, dict) and option.get("label")
+    options = [
+        option for option in (variables.get("reservation_options") or [])
+        if isinstance(option, dict)
     ]
-    if not labels:
+    if not options:
         return None
 
-    listing = "\n".join(labels)
-    return f"입력하신 전화번호로 조회된 예약입니다.\n{listing}"
+    # 조회는 취소처럼 번호로 하나를 골라야 하는 상황이 아니라 현황 확인이 목적이라,
+    # 목록을 나열하지 않고 가장 가까운 예약 하나만 말하듯 자연스러운 한 문장으로 안내한다.
+    nearest = options[0]
+    remaining = len(options) - 1
+
+    sentence = (
+        f"입력하신 전화번호로 가장 가까운 예약은 "
+        f"{nearest.get('spoken_datetime') or nearest.get('start_label')} "
+        f"{nearest.get('service_name') or '서비스'}이고, "
+        f"{nearest.get('status_label') or '-'} 상태예요."
+    )
+    if remaining > 0:
+        sentence += f" 이외에도 {remaining}건이 더 있어요. 자세히 안내해드릴까요?"
+    return sentence
 
 
 def build_cancel_selection_message(variables: dict[str, Any]) -> str | None:
-    options = variables.get("cancelable_options") or []
-    labels = [
-        str(option.get("label")).strip()
-        for option in options
-        if isinstance(option, dict) and option.get("label")
+    options = [
+        option for option in (variables.get("cancelable_options") or [])
+        if isinstance(option, dict)
     ]
-    if not labels:
+    # number=1(가장 가까운 예약)은 직전 confirm_nearest_cancel 단계에서 이미
+    # 거절당한 것이므로 다시 보여주지 않는다.
+    remaining = [option for option in options if option.get("number") != 1]
+    if not remaining:
         return None
 
-    listing = "\n".join(labels)
-    return (
-        "취소 가능한 예약을 찾았습니다. 취소할 예약 번호를 알려주세요.\n"
-        f"{listing}"
-    )
+    lines = [
+        f"{option.get('number')}. {option.get('spoken_datetime') or option.get('start_label')} "
+        f"{option.get('service_name') or '서비스'}"
+        for option in remaining
+    ]
+    listing = "\n".join(lines)
+    return f"그럼 아래 예약 중 몇 번을 취소해드릴까요?\n{listing}"
 
 
 def try_fast_path_ask_cancel_number_instruction(

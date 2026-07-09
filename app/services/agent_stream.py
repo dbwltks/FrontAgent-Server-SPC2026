@@ -10,9 +10,7 @@ AGENT_ERROR_MESSAGE = "Agent response failed"
 # LangGraph stream_mode="updates"가 알려주는 노드 완료 이벤트를 SSE trace 이벤트로 변환한다.
 NODE_TRACE_LABELS = {
     "prepare": "대화 세션/의도 분석 완료",
-    "task_router": "태스크 라우팅 완료",
     "task": "태스크 실행 완료",
-    "knowledge": "지식 검색 완료",
     "response": "응답 생성 완료",
 }
 
@@ -71,7 +69,7 @@ def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
             f"next_action={node_state.get('next_action')} / "
             f"task_type={node_state.get('task_type')}"
         )
-        return detail, [node_state.get("decision_reason", "")]
+        return detail, []
 
     if node_name == "task":
         task_result = node_state.get("task_result") or {}
@@ -83,24 +81,6 @@ def build_trace_detail(node_name: str, node_state: dict) -> tuple[str, list]:
             f"steps={len(task_trace)}",
             task_trace,
         )
-
-    if node_name == "knowledge":
-        groups = node_state.get("knowledge_context_groups", [])
-        sources = [k.get("source_title", "") for k in node_state.get("used_knowledge", [])]
-        items = [
-            {
-                "query": g.get("query"),
-                "chunks": [
-                    {
-                        "source_title": c.get("source_title"),
-                        "similarity": c.get("similarity"),
-                    }
-                    for c in g.get("chunks", [])
-                ],
-            }
-            for g in groups
-        ]
-        return f"{len(node_state.get('knowledge_queries', []))}개 질문 / {len(sources)}개 문서 참조", items
 
     return "", []
 

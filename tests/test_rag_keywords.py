@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from app.graph.nodes.agent_node import _build_knowledge_search_query
+from app.graph.handlers.agent_node import _build_knowledge_search_query
 from app.rag.indexer import (
     collapse_query_keywords,
     extract_keywords,
@@ -73,7 +73,7 @@ def test_collapse_query_keywords_drops_phrase_parts():
     assert collapsed == ["화장실 청소"]
 
 
-@patch("app.graph.nodes.agent_node.resolve_task_variables")
+@patch("app.graph.handlers.agent_node.resolve_task_variables")
 def test_build_knowledge_search_query_dedupes_service_variables(mock_resolve):
     mock_resolve.return_value = {
         "service_item_name": "화장실 청소",

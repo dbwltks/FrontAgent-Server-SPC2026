@@ -9,11 +9,9 @@ from app.services.agent_stream import (
     stream_agent_graph_events,
 )
 
-# /chat, /voice, /web-call이 모두 같은 LangGraph(conversation -> decision/task_router
-# -> rule -> task/knowledge/response -> save -> log)를 거치는 공통 진입점.
-# 그래프 자체나 노드 구성은 바꾸지 않고, 각 API에 반복되던 "그래프 실행 -> 결과
-# 추출" 패턴만 여기로 모은다. SSE 포맷이나 응답 스키마는 호출하는 쪽(chat.py,
-# web_call.py 등)이 채널 특성에 맞게 알아서 감싼다.
+# /chat, /voice, /web-call이 모두 같은 LangGraph(prepare -> agent -> response)를 거치는 공통 진입점.
+# 각 API에 반복되던 "그래프 실행 -> 결과 추출" 패턴만 여기로 모은다.
+# SSE 포맷이나 응답 스키마는 호출하는 쪽(chat.py, web_call.py 등)이 채널 특성에 맞게 감싼다.
 
 
 async def run_agent_turn(

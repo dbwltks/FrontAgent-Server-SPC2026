@@ -185,6 +185,11 @@ class TaskRepository:
         return rows[0] if rows else None
 
     def get_flow(self, flow_id: str) -> dict[str, Any] | None:
+        rkey = f"task:flow:{flow_id}"
+        cached = redis_client.get(rkey)
+        if cached:
+            return json.loads(cached)
+
         response = (
             self.client.table("task_flows")
             .select("*")
@@ -192,8 +197,10 @@ class TaskRepository:
             .single()
             .execute()
         )
-
-        return response.data
+        data = response.data
+        if data:
+            redis_client.setex(rkey, _FLOW_META_TTL, json.dumps(data))
+        return data
 
     def get_start_node(self, flow_id: str) -> dict[str, Any] | None:
         rkey = _rkey_start_node(flow_id)

@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any, Callable
 
 from app.tasks.edge_evaluator import evaluate_condition_expression, select_failure_edge, select_next_edge
@@ -22,16 +23,10 @@ class DynamicTaskRunner:
         initial_variables: dict[str, Any] | None = None,
     ) -> TaskRunResponse:
         """
-        MVP 2단계 기준 실행 방식.
-
         1. 진행 중 task_session이 있으면 이어서 실행
         2. 없으면 flow_id가 전달된 경우 해당 flow를 수동 시작
         3. flow_id가 없고 진행 중 session도 없으면 handled=False 반환
-
-        trigger 판단은 agent_node에서 task_flows 트리거 매칭으로 수행하고,
-        매칭 시 flow_id를 넘겨 세션을 시작한다.
         """
-
         task_session = self.repository.find_active_session(
             organization_id=organization_id,
             session_id=session_id,

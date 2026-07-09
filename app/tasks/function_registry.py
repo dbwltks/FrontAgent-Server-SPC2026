@@ -353,13 +353,21 @@ def _format_reservation_option(
 
     start_at = reservation.get("start_at")
     start_label = start_at
+    spoken_datetime = start_at
     if start_at:
         try:
-            start_label = _parse_datetime_value(start_at, "Asia/Seoul").astimezone(
-                ZoneInfo("Asia/Seoul")
-            ).strftime("%m/%d %H:%M")
+            start_dt = _parse_datetime_value(start_at, "Asia/Seoul").astimezone(ZoneInfo("Asia/Seoul"))
+            start_label = start_dt.strftime("%m/%d %H:%M")
+            period = "오전" if start_dt.hour < 12 else "오후"
+            display_hour = start_dt.hour % 12 or 12
+            spoken_datetime = (
+                f"{start_dt.month}월 {start_dt.day}일 {period} {display_hour}시"
+                if start_dt.minute == 0
+                else f"{start_dt.month}월 {start_dt.day}일 {period} {display_hour}시 {start_dt.minute}분"
+            )
         except Exception:
             start_label = start_at
+            spoken_datetime = start_at
 
     customer_name = reservation.get("customer_name") or "고객"
     _status_map = {
@@ -379,9 +387,13 @@ def _format_reservation_option(
         "customer_name": reservation.get("customer_name"),
         "customer_phone": reservation.get("customer_phone"),
         "service_id": reservation.get("service_id"),
+        "service_name": service_name,
         "start_at": reservation.get("start_at"),
+        "start_label": start_label,
+        "spoken_datetime": spoken_datetime,
         "end_at": reservation.get("end_at"),
         "status": reservation.get("status"),
+        "status_label": status,
         "label": f"{index}. {service_name} / {start_label} / {customer_name} ({status})",
     }
 
@@ -1238,6 +1250,7 @@ def reservation_list_reservations(
     )
     status_value = _get_value(params, variables, "status")
     limit_value = _get_value(params, variables, "limit", default=10)
+    include_past = _get_value(params, variables, "include_past", default=False) is True
 
     missing_keys = []
 
@@ -1262,18 +1275,25 @@ def reservation_list_reservations(
     try:
         status_filter = _normalize_status_filter(status_value)
         limit = _parse_positive_int(limit_value) or 10
+        # 조회는 기본적으로 다가올 예약만 보여준다 - 고객이 예약 조회를 요청할 때
+        # 대개 궁금한 건 "앞으로의 예약"이고, 지난 예약까지 섞어서 다 보여주면
+        # 정작 궁금한 다가올 예약이 과거 기록에 묻혀 응답이 길어진다. 지난 예약이
+        # 궁금하면(include_past=True) 명시적으로 요청했을 때만 포함한다.
+        date_from = None if include_past else datetime.now(ZoneInfo("Asia/Seoul"))
 
         if status_filter and len(status_filter) == 1:
             reservations = repo_list_reservations(
                 organization_id=organization_id,
                 customer_phone=customer_phone,
                 status=status_filter[0],
+                date_from=date_from,
                 limit=limit,
             )
         else:
             reservations = repo_list_reservations(
                 organization_id=organization_id,
                 customer_phone=customer_phone,
+                date_from=date_from,
                 limit=limit,
             )
 

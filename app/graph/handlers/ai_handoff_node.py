@@ -11,7 +11,6 @@ def build_ai_handoff_update(base_update: dict) -> dict:
         "use_knowledge": False,
         "decision_reason": "AI 자동응답이 꺼져 있어 관리자 응답 대기 상태로 전환",
         "task_result": None,
-        "should_use_knowledge": False,
         "final_response": None,
         "rules": [],
         "applied_rules": [],

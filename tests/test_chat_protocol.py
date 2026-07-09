@@ -5,24 +5,24 @@ from app.api.chat import build_trace_detail, sse_event
 
 
 class ChatProtocolTests(unittest.TestCase):
-    def test_rule_trace_contains_only_rule_instruction_fields(self):
+    def test_prepare_trace_contains_intent_and_action(self):
         detail, items = build_trace_detail(
-            "rule",
+            "prepare",
             {
-                "rules": [
-                    {
-                        "name": "존댓말",
-                        "instruction": "항상 존댓말을 사용한다.",
-                    }
-                ]
+                "intent": "reservation",
+                "next_action": "run_task",
+                "task_type": "reservation_create",
             },
         )
 
-        self.assertEqual(detail, "활성 규칙 1개를 응답 지시문에 반영")
-        self.assertEqual(
-            items,
-            [{"name": "존댓말", "instruction": "항상 존댓말을 사용한다."}],
-        )
+        self.assertIn("intent=reservation", detail)
+        self.assertIn("next_action=run_task", detail)
+        self.assertEqual(items, [])
+
+    def test_unknown_node_returns_empty(self):
+        detail, items = build_trace_detail("unknown_node", {})
+        self.assertEqual(detail, "")
+        self.assertEqual(items, [])
 
     def test_sse_event_uses_named_event_and_json_data(self):
         event = sse_event("delta", {"delta": "안녕"})

@@ -8,32 +8,19 @@ MAX_CHECKPOINT_MESSAGES = 24
 # 다음 턴에 필요 없는 일회성 필드는 checkpoint에 남기지 않는다.
 CHECKPOINT_EPHEMERAL_CLEAR: dict[str, Any] = {
     "knowledge_context": [],
-    "knowledge_context_groups": [],
-    "knowledge_queries": [],
     "used_knowledge": [],
     "rules": [],
     "applied_rules": [],
     "final_response": None,
+    "follow_up_response": None,
     "intent": None,
     "next_action": None,
     "decision_reason": None,
     "use_knowledge": False,
-    "should_use_knowledge": False,
     "should_end_session": False,
-    "task_handled": False,
     "task_status": None,
     "knowledge_folder_id": None,
-    "pending_task_prompt": None,
-    "follow_up_response": None,
     "log_message": None,
-    "active_task_session": None,
-    "current_task_node": None,
-    "current_task_flow_id": None,
-    "current_task_node_key": None,
-    "current_task_node_type": None,
-    "task_route": None,
-    "task_route_confidence": None,
-    "task_route_reason": None,
 }
 
 

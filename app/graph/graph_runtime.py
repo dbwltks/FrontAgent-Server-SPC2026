@@ -255,8 +255,6 @@ def build_initial_state(
         "log_message": log_message,
         "channel": channel,
 
-        "pending_task_prompt": None,
-        "follow_up_response": None,
         "conversation_id": None,
         "ai_enabled": True,
 
@@ -270,8 +268,9 @@ def build_initial_state(
         # task_result/active_task/task_step은 checkpointer가 이전 턴 값을
         # 유지한다. task memory(variables)는 task_sessions(Redis/DB)만 source of truth.
 
-        # 기존 should_use_knowledge_node와의 호환용
-        "should_use_knowledge": False,
+        # 응답
+        "follow_up_response": None,
+        "final_response": None,
 
         # rules
         "rules": [],
@@ -281,9 +280,6 @@ def build_initial_state(
         "knowledge_folder_id": knowledge_folder_id,
         "knowledge_context": [],
         "used_knowledge": [],
-
-        # final response
-        "final_response": None,
     }
 
 

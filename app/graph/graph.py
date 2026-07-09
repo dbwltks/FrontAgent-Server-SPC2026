@@ -1,6 +1,6 @@
 from langgraph.graph import END, START, StateGraph
 
-from app.graph.nodes.prepare_node import prepare_node
+from app.graph.handlers.prepare_node import prepare_node
 from app.graph.state import AgentState
 
 

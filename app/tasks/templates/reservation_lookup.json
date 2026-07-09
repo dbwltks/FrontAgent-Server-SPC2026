@@ -18,14 +18,127 @@
   "nodes": [
     {
       "node_key": "found_end",
-      "node_type": "message",
-      "label": "예약 조회 완료",
+      "node_type": "ask",
+      "label": "예약 조회 완료 - 상세 안내 여부 확인",
       "config": {
-        "message": "{{memory.lookup_result_message|입력하신 전화번호로 조회된 예약을 찾지 못했습니다.}}",
-        "next_step_mode": "end"
+        "question": "{{memory.lookup_result_message}}",
+        "variable_name": "full_list_answer",
+        "next_step_mode": "single",
+        "next_node_key": "judge_wants_full_list"
       },
       "position_x": 1360,
       "position_y": 200,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "judge_wants_full_list",
+      "node_type": "instruction",
+      "label": "상세 안내 여부 판단",
+      "config": {
+        "instruction": "[역할]\n방금 고객에게 예약 조회 결과를 안내했고(\"이외에도 N건이 더 있어요. 자세히 안내해드릴까요?\" 같은 문구가 포함될 수 있음), 이제 그 답을 받는 에이전트다.\n\n[대화 흐름]\n- 안내에 남은 예약이 있다는 문구가 없었다면(더 볼 게 없는 경우), 고객 메시지와 무관하게 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"wants_full_list\"></promptdata>를 false로 저장하고 종료한다.\n- 남은 예약이 있다는 문구가 있었던 경우: 고객이 긍정(네, 알려주세요, 보여주세요 등)하면 wants_full_list를 true로, 부정(아니요, 괜찮아요 등)하면 false로 저장하고 종료한다.\n\n[종료 조건]\n- wants_full_list 값이 정해지면 종료한다.\n\n<promptdata type=\"read-variable\" subtype=\"text\" identifier=\"lookup_result_message\"></promptdata>",
+        "next_step_mode": "branch",
+        "save_to_memory": true,
+        "branch_node_key": "route_by_count",
+        "branch_condition": "memory.wants_full_list == true",
+        "fallback_node_key": "lookup_complete_end"
+      },
+      "position_x": 1460,
+      "position_y": 200,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "route_by_count",
+      "node_type": "condition",
+      "label": "예약 건수로 안내 방식 분기",
+      "config": {
+        "variable": "count",
+        "operator": "greater_than",
+        "value": 3,
+        "save_as": "has_many_reservations",
+        "next_step_mode": "branch",
+        "branch_node_key": "ask_which_reservation",
+        "branch_condition": "memory.has_many_reservations == true",
+        "fallback_node_key": "show_full_list"
+      },
+      "position_x": 1560,
+      "position_y": 280,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "lookup_complete_end",
+      "node_type": "message",
+      "label": "예약 조회 종료",
+      "config": {
+        "message": "{{memory.full_list_message}}",
+        "next_step_mode": "end"
+      },
+      "position_x": 1760,
+      "position_y": 120,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "show_full_list",
+      "node_type": "instruction",
+      "label": "예약 전체 안내 (3건 이하)",
+      "config": {
+        "instruction": "[역할]\n예약 목록(3건 이하)을 실제 상담원처럼 자연스러운 문장으로 안내하는 에이전트다.\n\n[대화 흐름]\n- <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"reservation_options\"></promptdata>의 모든 항목(spoken_datetime, service_name, status_label)을 빠짐없이, 표/번호/하이픈 나열 없이 말하듯 이어지는 문장으로 안내한다. 매번 표현을 조금씩 다르게 한다.\n- 안내 문장을 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"full_list_message\"></promptdata>에 저장한다(message는 null로 둔다).\n\n[종료 조건]\n- full_list_message를 저장하면 바로 종료한다.",
+        "next_step_mode": "single",
+        "next_node_key": "lookup_complete_end",
+        "save_to_memory": true
+      },
+      "position_x": 1760,
+      "position_y": 280,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "ask_which_reservation",
+      "node_type": "instruction",
+      "label": "예약 다건 - 좁히는 질문 생성",
+      "config": {
+        "instruction": "[역할]\n예약이 4건 이상 있어, 전부 나열하지 않고 고객에게 어느 예약이 궁금한지 되묻는 질문을 만드는 에이전트다. 이 노드는 무조건 되묻기만 하고 절대 예약 내용을 안내하지 않는다.\n\n[작업]\n- <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"reservation_options\"></promptdata>를 참고해, 날짜대나 서비스 종류로 나눠서 어느 것이 궁금한지 되묻는 질문을 만든다. 예: \"예약이 여러 건 있는데, 이번 주 걸 보여드릴까요, 다음 주 걸 보여드릴까요?\" 또는 \"화장실 청소랑 정기 청소가 섞여 있는데, 어떤 서비스 예약이 궁금하세요?\" 매번 다른 자연스러운 표현으로 질문한다.\n- 만든 질문은 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"narrowing_question\"></promptdata>에 저장한다(message는 null로 둔다).\n\n[종료 조건]\n- narrowing_question을 저장하면 바로 종료한다.",
+        "next_step_mode": "single",
+        "next_node_key": "show_narrowing_question",
+        "save_to_memory": true
+      },
+      "position_x": 1760,
+      "position_y": 380,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "show_narrowing_question",
+      "node_type": "ask",
+      "label": "좁히는 질문 노출",
+      "config": {
+        "question": "{{memory.narrowing_question}}",
+        "variable_name": "narrowing_answer",
+        "next_step_mode": "single",
+        "next_node_key": "filter_reservations"
+      },
+      "position_x": 1960,
+      "position_y": 380,
+      "timeout_seconds": 10,
+      "retry_limit": 0
+    },
+    {
+      "node_key": "filter_reservations",
+      "node_type": "instruction",
+      "label": "예약 다건 - 조건에 맞춰 안내",
+      "config": {
+        "instruction": "[역할]\n방금 고객에게 <promptdata type=\"read-variable\" subtype=\"text\" identifier=\"narrowing_question\"></promptdata>라고 되물었고, 이제 그 답을 받는 에이전트다.\n\n[작업]\n- <promptdata type=\"read-variable\" subtype=\"json\" identifier=\"reservation_options\"></promptdata>를 참고한다.\n- 고객이 조건(날짜, 서비스명, 순서, \"전체\" 등)으로 답했으면, 조건에 해당하는 것만(전체 요청이면 전부) 골라 표/번호/하이픈 나열 없이 자연스러운 문장으로 안내한다.\n- 고객 답이 애매해서 어떤 조건인지 특정할 수 없으면, 다시 한번 자연스럽게 되묻는다(이 경우 message에 되묻는 질문만 담고 full_list_message는 저장하지 않는다).\n- 안내를 완료했으면 안내 문장을 <promptdata type=\"update-variable\" subtype=\"text\" identifier=\"full_list_message\"></promptdata>에 저장한다(message는 null로 둔다).\n\n[종료 조건]\n- full_list_message를 저장했으면(=실제로 예약 내용을 안내했으면) 종료한다. 다시 되묻는 중이면 종료하지 않는다.",
+        "next_step_mode": "branch",
+        "save_to_memory": true,
+        "branch_node_key": "lookup_complete_end",
+        "branch_condition": "memory.full_list_message != null",
+        "fallback_node_key": "filter_reservations"
+      },
+      "position_x": 2160,
+      "position_y": 380,
       "timeout_seconds": 10,
       "retry_limit": 0
     },

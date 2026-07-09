@@ -377,7 +377,7 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
             {
                 "type": "function",
                 "name": "query_agent",
-                "description": "사용자 발화를 Front Agent LangGraph에 전달해 최종 답변을 받는다.",
+                "description": "사용자 발화를 Front Agent에 전달해 최종 답변을 받는다.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -391,11 +391,6 @@ def build_realtime_session_config(ai_settings: dict | None = None) -> dict:
                 },
             },
         ],
-        # required는 매 turn마다 query_agent 호출을 강제해, 에코/잡음으로 생긴
-        # 허위 turn에도 모델이 message를 지어내 함수를 호출하게 만든다(사용자가
-        # 말하지 않은 내용으로 AI가 혼자 대화를 이어가는 증상의 원인). instructions
-        # 에 이미 "의미 있는 발화가 아니면 호출하지 마라"를 명시했으므로 auto로
-        # 바꿔도 실제 발화에는 정상적으로 호출된다.
         "tool_choice": "auto",
     }
 

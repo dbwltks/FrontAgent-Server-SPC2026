@@ -1,7 +1,7 @@
 import logging
 import threading
 
-from app.graph.nodes.conversation_node import ensure_conversation_for_session
+from app.graph.handlers.conversation_node import ensure_conversation_for_session
 from app.graph.state import AgentState
 from app.repositories.agent_run_repo import create_agent_run
 from app.repositories.conversation_repo import (

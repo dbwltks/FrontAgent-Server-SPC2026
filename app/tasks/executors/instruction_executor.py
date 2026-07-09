@@ -177,6 +177,7 @@ async def execute_instruction_node(
             },
         )
 
+    # 서비스 선택·취소 번호 선택은 LLM 없이 코드로 처리 (항상 실행)
     fast_path = try_fast_path_ask_service_instruction(
         node=node,
         memory=memory,

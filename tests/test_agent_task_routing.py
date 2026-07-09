@@ -1,13 +1,12 @@
 from unittest.mock import patch
 
-from app.graph.nodes.agent_node import (
+from app.graph.handlers.agent_node import (
     _build_knowledge_search_query,
     _extract_available_service_names,
-    _looks_like_knowledge_interrupt,
+    _looks_like_knowledge_question,
     _looks_like_task_slot_answer,
     _prioritize_chunks_for_user_query,
     _resolve_knowledge_search_query,
-    _task_turn_made_progress,
 )
 from app.rag.query_matching import looks_like_question
 
@@ -17,53 +16,33 @@ ASK_SERVICE_PROMPT = (
 )
 
 
-def test_service_selection_answer_is_not_faq_interrupt():
+def test_service_selection_answer_is_not_knowledge_question():
     message = "저 화장실청소요"
     assert _looks_like_task_slot_answer(message, ASK_SERVICE_PROMPT) is True
-    assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is False
+    assert _looks_like_knowledge_question(message, ASK_SERVICE_PROMPT) is False
 
 
-def test_question_with_service_name_during_selection_is_faq_interrupt():
+def test_question_with_service_name_during_selection_is_knowledge_question():
     for message in ("입주청소가 뭐에요?", "입주청소얼마에요?"):
         assert looks_like_question(message) is True
         assert _looks_like_task_slot_answer(message, ASK_SERVICE_PROMPT) is False
-        assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is True
+        assert _looks_like_knowledge_question(message, ASK_SERVICE_PROMPT) is True
 
 
-def test_service_selection_short_answer_is_not_faq_interrupt():
+def test_service_selection_short_answer_is_not_knowledge_question():
     message = "베란다 청소"
     assert _looks_like_task_slot_answer(message, ASK_SERVICE_PROMPT) is True
-    assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is False
+    assert _looks_like_knowledge_question(message, ASK_SERVICE_PROMPT) is False
 
 
-def test_duration_question_is_faq_interrupt():
+def test_duration_question_is_knowledge_question():
     message = "시간 얼마나 걸려요?"
-    assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is True
+    assert _looks_like_knowledge_question(message, ASK_SERVICE_PROMPT) is True
 
 
-def test_price_question_is_faq_interrupt():
+def test_price_question_is_knowledge_question():
     message = "근데 얼마예요?"
-    assert _looks_like_knowledge_interrupt(message, ASK_SERVICE_PROMPT) is True
-
-
-def test_task_progress_when_service_resolved():
-    assert _task_turn_made_progress(
-        before_step="ask_service",
-        before_vars={},
-        after_step="ask_name",
-        after_vars={"service_item_id": "svc-1"},
-        task_status="waiting_user_input",
-    )
-
-
-def test_task_no_progress_when_stuck_on_same_step():
-    assert not _task_turn_made_progress(
-        before_step="ask_service",
-        before_vars={},
-        after_step="ask_service",
-        after_vars={"service_item_text": "근데 얼마예요?"},
-        task_status="waiting_user_input",
-    )
+    assert _looks_like_knowledge_question(message, ASK_SERVICE_PROMPT) is True
 
 
 def test_extract_available_service_names():
@@ -80,7 +59,7 @@ def test_extract_available_service_names():
     assert names == ["화장실 청소", "베란다 청소"]
 
 
-@patch("app.graph.nodes.agent_node.resolve_task_variables")
+@patch("app.graph.handlers.agent_node.resolve_task_variables")
 def test_build_knowledge_search_query_uses_available_services(mock_resolve):
     mock_resolve.return_value = {
         "available_services": {
@@ -96,7 +75,7 @@ def test_build_knowledge_search_query_uses_available_services(mock_resolve):
     assert "가격" in query
 
 
-@patch("app.graph.nodes.agent_node.resolve_task_variables")
+@patch("app.graph.handlers.agent_node.resolve_task_variables")
 def test_build_knowledge_search_query_skips_catalog_when_service_named(mock_resolve):
     mock_resolve.return_value = {
         "service_item_name": "화장실 청소",
@@ -109,8 +88,8 @@ def test_build_knowledge_search_query_skips_catalog_when_service_named(mock_reso
     assert "베란다 청소" not in query
 
 
-@patch("app.graph.nodes.agent_node.get_organization_keyword_vocabulary")
-@patch("app.graph.nodes.agent_node.resolve_task_variables")
+@patch("app.graph.handlers.agent_node.get_organization_keyword_vocabulary")
+@patch("app.graph.handlers.agent_node.resolve_task_variables")
 def test_resolve_knowledge_search_query_ignores_llm_when_service_named(
     mock_resolve,
     mock_vocab,
@@ -134,8 +113,8 @@ def test_resolve_knowledge_search_query_ignores_llm_when_service_named(
     assert "입주" not in query
 
 
-@patch("app.graph.nodes.agent_node.get_organization_keyword_vocabulary")
-@patch("app.graph.nodes.agent_node.resolve_task_variables")
+@patch("app.graph.handlers.agent_node.get_organization_keyword_vocabulary")
+@patch("app.graph.handlers.agent_node.resolve_task_variables")
 def test_resolve_knowledge_search_query_uses_llm_for_vague_follow_up(
     mock_resolve,
     mock_vocab,
