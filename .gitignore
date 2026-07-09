@@ -10,3 +10,5 @@ supabase/.temp/
 .docs/
 .codex/
 .claude/
+.agents/
+skills-lock.json
